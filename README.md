@@ -226,7 +226,7 @@ $$
 预期回报（无论采用哪种衡量标准）用 $J(\pi)$ 表示，即：
 
 $$
-J(\pi) = \int_{\tau} P(\tau|\pi) R(\tau) = \underE{\tau\sim \pi}{R(\tau)}
+J(\pi) = \int_{\tau} P(\tau|\pi) R(\tau) = \underset{\tau\sim \pi}E[{R(\tau)}]
 $$
 
 强化学习中的核心优化问题可以表示为
@@ -246,25 +246,25 @@ $$
 1. On-Policy价值函数 $V^{\pi}(s)$ ，如果从状态 $s$ 开始并始终按照策略 $\pi$ 行事，它将给出预期回报：
 
 $$
-V^{\pi}(s) = \underE{\tau \sim \pi}{R(\tau)\left| s_0 = s\right.}
+V^{\pi}(s) = \underset{\tau \sim \pi}E[{R(\tau)\left| s_0 = s\right.}]
 $$
 
 2. On-Policy动作-价值函数 $Q^{\pi}(s,a)$ ，如果从状态 $s$ 开始，采取任意动作 $a$ （可能不是来自策略），然后永远按照策略 $\pi$ 采取行动，它将给出预期的回报：
 
 $$
-Q^{\pi}(s,a) = \underE{\tau \sim \pi}{R(\tau)\left| s_0 = s, a_0 = a\right.}
+Q^{\pi}(s,a) = \underset{\tau \sim \pi}E[{R(\tau)\left| s_0 = s, a_0 = a\right.}]
 $$
 
 3. 最优价值函数 $V^*(s)$ ，如果从状态 $s$ 开始并始终按照环境中的最优策略行事，它将给出预期回报：
 
 $$
-V^*(s) = \max_{\pi} \underE{\tau \sim \pi}{R(\tau)\left| s_0 = s\right.}
+V^*(s) = \max_{\pi} \underset{\tau \sim \pi}E[{R(\tau)\left| s_0 = s\right.}]
 $$
 
 4. 最优动作价值函数 $Q^*(s,a)$ ，如果从状态 $s$ 开始，采取任意动作 $a$ ，然后永远按照环境中的最优策略采取行动，它将给出预期回报：
 
 $$
-Q^*(s,a) = \max_{\pi} \underE{\tau \sim \pi}{R(\tau)\left| s_0 = s, a_0 = a\right.}
+Q^*(s,a) = \max_{\pi} \underset{\tau \sim \pi}E[{R(\tau)\left| s_0 = s, a_0 = a\right.}]
 $$
 
 当我们讨论价值函数时，如果不考虑时间依赖性，我们仅仅指无限期预期有折扣的收益 。有限期没有折扣的收益的价值函数需要接受时间作为参数。你能想想为什么吗？提示：时间到了会发生什么？
@@ -272,7 +272,7 @@ $$
 价值函数和动作-价值函数之间有两个经常出现的关键联系：
 
 $$
-V^{\pi}(s) = \underE{a\sim \pi}{Q^{\pi}(s,a)}
+V^{\pi}(s) = \underset{a\sim \pi}E[{Q^{\pi}(s,a)}]
 $$
 
 和
@@ -303,8 +303,8 @@ $$
 
 $$
 \begin{align*}
-V^{\pi}(s) &= \underE{a \sim \pi \\ s'\sim P}{r(s,a) + \gamma V^{\pi}(s')}, \\
-Q^{\pi}(s,a) &= \underE{s'\sim P}{r(s,a) + \gamma \underE{a'\sim \pi}{Q^{\pi}(s',a')}},
+V^{\pi}(s) &= \underset{a \sim \pi \\ {s'\sim P}}E[{r(s,a) + \gamma V^{\pi}(s')}], \\
+Q^{\pi}(s,a) &= \underset{s'\sim P}E[{r(s,a) + \gamma \underset{a'\sim \pi}E[{Q^{\pi}(s',a')}}]],
 \end{align*}
 $$
 
@@ -314,8 +314,8 @@ $$
 
 $$
 \begin{align*}
-V^*(s) &= \max_a \underE{s'\sim P}{r(s,a) + \gamma V^*(s')}, \\
-Q^*(s,a) &= \underE{s'\sim P}{r(s,a) + \gamma \max_{a'} Q^*(s',a')}.
+V^*(s) &= \max_a \underset{s'\sim P}E[{r(s,a) + \gamma V^*(s')}], \\
+Q^*(s,a) &= \underset{s'\sim P}E[{r(s,a) + \gamma \max_{a'} Q^*(s',a')}].
 \end{align*}
 $$
 
