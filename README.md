@@ -804,7 +804,7 @@ Expected Grad-Log-Prob Lemma
 EGLP 引理。 假设 $P_{\theta}$ 是随机变量 $x$ 的参数化概率分布。则：
 
 $$
-\underE{x \sim P_{\theta}}{\nabla_{\theta} \log P_{\theta}(x)} = 0.
+\underset{x \sim P_{\theta}}E{\nabla_{\theta} \log P_{\theta}(x)} = 0.
 $$
 
 > 证明：
@@ -827,7 +827,7 @@ $$
 > 0 &= \nabla_{\theta} \int_x P_{\theta}(x) \\
 > &= \int_x \nabla_{\theta} P_{\theta}(x) \\
 > &= \int_x P_{\theta}(x) \nabla_{\theta} \log P_{\theta}(x) \\
-> \therefore 0 &= \underE{x \sim P_{\theta}}{\nabla_{\theta} \log P_{\theta}(x)}.
+> \therefore 0 &= \underset{x \sim P_{\theta}}E{\nabla_{\theta} \log P_{\theta}(x)}.
 > $$
 > 
 
@@ -836,7 +836,7 @@ $$
 检查我们最新的策略梯度表达式：
 
 $$
-\nabla_{\theta} J(\pi_{\theta}) = \underE{\tau \sim \pi_{\theta}}{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) R(\tau)}.
+\nabla_{\theta} J(\pi_{\theta}) = \underset{\tau \sim \pi_{\theta}}E{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) R(\tau)}.
 $$
 
 按照这个梯度迈出一步，每个动作的对数概率都会与 $R(\tau)$ （所有获得奖励的总和）成比例地上升。但这没有多大意义。
@@ -846,7 +846,7 @@ $$
 事实证明，这种直觉在数学上是成立的，我们可以证明策略梯度也可以表示为
 
 $$
-\nabla_{\theta} J(\pi_{\theta}) = \underE{\tau \sim \pi_{\theta}}{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) \sum_{t'=t}^T R(s_{t'}, a_{t'}, s_{t'+1})}.
+\nabla_{\theta} J(\pi_{\theta}) = \underset{\tau \sim \pi_{\theta}}E{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) \sum_{t'=t}^T R(s_{t'}, a_{t'}, s_{t'+1})}.
 $$
 
 在这种形式下，行动只会根据采取行动后获得的奖励而得到强化。
@@ -895,13 +895,13 @@ def reward_to_go(rews):
 EGLP 引理的一个直接推论是，对于任何仅依赖于状态的函数 $b$ ，
 
 $$
-\underE{a_t \sim \pi_{\theta}}{\nabla_{\theta} \log \pi_{\theta}(a_t|s_t) b(s_t)} = 0.
+\underset{a_t \sim \pi_{\theta}}E{\nabla_{\theta} \log \pi_{\theta}(a_t|s_t) b(s_t)} = 0.
 $$
 
 这使我们能够在策略梯度表达式中添加或减去任意数量的类似项，而无需改变其期望值：
 
 $$
-\nabla_{\theta} J(\pi_{\theta}) = \underE{\tau \sim \pi_{\theta}}{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) \left(\sum_{t'=t}^T R(s_{t'}, a_{t'}, s_{t'+1}) - b(s_t)\right)}.
+\nabla_{\theta} J(\pi_{\theta}) = \underset{\tau \sim \pi_{\theta}}E{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) \left(\sum_{t'=t}^T R(s_{t'}, a_{t'}, s_{t'+1}) - b(s_t)\right)}.
 $$
 
 任何以此方式使用的函数 $b$ 都称为基线 。
@@ -915,7 +915,7 @@ $$
 在大多数策略优化算法（包括 VPG、TRPO、PPO 和 A2C）的实现中，学习 $V_{\phi}$ 的最简单方法是最小化均方误差目标：
 
 $$
-\phi_k = \arg \min_{\phi} \underE{s_t, \hat{R}_t \sim \pi_k}{\left( V_{\phi}(s_t) - \hat{R}_t \right)^2},
+\phi_k = \arg \min_{\phi} \underset{s_t, \hat{R}_t \sim \pi_k}E{\left( V_{\phi}(s_t) - \hat{R}_t \right)^2},
 $$
 
 其中 $\pi_k$ 是第 $k$ 个周期的策略。这是通过一步或多步梯度下降完成的，从先前的值参数 $\phi_{k-1}$ 开始。
@@ -925,25 +925,25 @@ $$
 到目前为止，我们已经看到策略梯度具有一般形式
 
 $$
-\nabla_{\theta} J(\pi_{\theta}) = \underE{\tau \sim \pi_{\theta}}{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) \Phi_t},
+\nabla_{\theta} J(\pi_{\theta}) = \underset{\tau \sim \pi_{\theta}}E{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) \Phi_t},
 $$
 
 其中 $\Phi_t$ 可以是以下任意一项
 
 $$
-\Phi_t &= R(\tau),
+\Phi_t = R(\tau),
 $$
 
 或者
 
 $$
-\Phi_t &= \sum_{t'=t}^T R(s_{t'}, a_{t'}, s_{t'+1}),
+\Phi_t = \sum_{t'=t}^T R(s_{t'}, a_{t'}, s_{t'+1}),
 $$
 
 或者
 
 $$
-\Phi_t &= \sum_{t'=t}^T R(s_{t'}, a_{t'}, s_{t'+1}) - b(s_t).
+\Phi_t = \sum_{t'=t}^T R(s_{t'}, a_{t'}, s_{t'+1}) - b(s_t).
 $$
 
 尽管方差不同，所有这些选择都会导致相同的策略梯度预期值。事实证明，还有两个更有效的权重选择 $\Phi_t$ ，了解这些选择很重要。
