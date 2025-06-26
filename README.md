@@ -794,3 +794,129 @@ if __name__ == '__main__':
     print('\nUsing simplest formulation of policy gradient.\n')
     train(env_name=args.env_name, render=args.render, lr=args.lr)
 ```
+
+## 预期梯度对数概率（EGLP）引理
+
+Expected Grad-Log-Prob Lemma
+
+在本小节中，我们将推导出一个在策略梯度理论中被广泛使用的中间结果。我们将其称为预期梯度对数概率（EGLP）引理。
+
+EGLP 引理。 假设 $P_{\theta}$ 是随机变量 $x$ 的参数化概率分布。则：
+
+$$
+\underE{x \sim P_{\theta}}{\nabla_{\theta} \log P_{\theta}(x)} = 0.
+$$
+
+> 证明：
+> 
+> 回想一下，所有概率分布都是归一化的 ：
+> 
+> $$
+> \int_x P_{\theta}(x) = 1.
+> $$
+> 
+> 对归一化条件两边取梯度：
+> 
+> $$
+> \nabla_{\theta} \int_x P_{\theta}(x) = \nabla_{\theta} 1 = 0.
+> $$
+> 
+> 使用对数导数技巧可得到：
+> 
+> $$
+> 0 &= \nabla_{\theta} \int_x P_{\theta}(x) \\
+> &= \int_x \nabla_{\theta} P_{\theta}(x) \\
+> &= \int_x P_{\theta}(x) \nabla_{\theta} \log P_{\theta}(x) \\
+> \therefore 0 &= \underE{x \sim P_{\theta}}{\nabla_{\theta} \log P_{\theta}(x)}.
+> $$
+> 
+
+## 别让过去分散你的注意力
+
+检查我们最新的策略梯度表达式：
+
+$$
+\nabla_{\theta} J(\pi_{\theta}) = \underE{\tau \sim \pi_{\theta}}{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) R(\tau)}.
+$$
+
+按照这个梯度迈出一步，每个动作的对数概率都会与 $R(\tau)$ （所有获得奖励的总和）成比例地上升。但这没有多大意义。
+
+代理实际上应该只根据行动的后果来强化行动。采取行动之前获得的奖励与该行动的效果无关：只有行动之后获得的奖励才有效。
+
+事实证明，这种直觉在数学上是成立的，我们可以证明策略梯度也可以表示为
+
+$$
+\nabla_{\theta} J(\pi_{\theta}) = \underE{\tau \sim \pi_{\theta}}{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) \sum_{t'=t}^T R(s_{t'}, a_{t'}, s_{t'+1})}.
+$$
+
+在这种形式下，行动只会根据采取行动后获得的奖励而得到强化。
+
+我们将这种形式称为“奖励前进策略梯度”，因为在轨迹中某一点之后的奖励总和，
+
+$$
+\hat{R}_t \doteq \sum_{t'=t}^T R(s_{t'}, a_{t'}, s_{t'+1}),
+$$
+
+被称为从该点开始的奖励 ，并且该策略梯度表达式取决于状态-动作对的奖励。
+
+> 但如何才能更好呢？ 策略梯度的一个关键问题是，需要多少样本轨迹才能获得低方差的样本估计。我们最初的公式包含了与过去奖励成比例的强化动作项，这些项的均值为零，但方差不为零：因此，它们只会给策略梯度的样本估计增加噪声。通过移除这些项，我们可以减少所需的样本轨迹数量。
+
+此声明的（可选）证明可在 “此处” 找到，它最终取决于 EGLP 引理。
+
+## 实现 Reward-to-Go 策略梯度
+
+与 `1_simple_pg.py` 相比，唯一的变化是我们现在在损失函数中使用了不同的权重。代码修改非常小：我们添加了一个新函数，并更改了另外两行。新函数如下：
+
+```py
+def reward_to_go(rews):
+    n = len(rews)
+    rtgs = np.zeros_like(rews)
+    for i in reversed(range(n)):
+        rtgs[i] = rews[i] + (rtgs[i+1] if i+1 < n else 0)
+    return rtgs
+```
+
+然后我们对旧的 L91-92 进行调整：
+
+```py
+                # the weight for each logprob(a|s) is R(tau)
+                batch_weights += [ep_ret] * ep_len
+```
+
+到：
+
+```py
+                # the weight for each logprob(a_t|s_t) is reward-to-go from t
+                batch_weights += list(reward_to_go(ep_rews))
+```
+
+## 策略梯度中的基线
+
+EGLP 引理的一个直接推论是，对于任何仅依赖于状态的函数 $b$ ，
+
+$$
+\underE{a_t \sim \pi_{\theta}}{\nabla_{\theta} \log \pi_{\theta}(a_t|s_t) b(s_t)} = 0.
+$$
+
+这使我们能够在策略梯度表达式中添加或减去任意数量的类似项，而无需改变其期望值：
+
+$$
+\nabla_{\theta} J(\pi_{\theta}) = \underE{\tau \sim \pi_{\theta}}{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) \left(\sum_{t'=t}^T R(s_{t'}, a_{t'}, s_{t'+1}) - b(s_t)\right)}.
+$$
+
+任何以此方式使用的函数 $b$ 都称为基线 。
+
+最常见的基线选择是策略值函数 $V^{\pi}(s_t)$ 。回想一下，如果智能体从状态 $s_t$ 开始，然后在其余生中按照策略 $\pi$ 行动，则该函数表示智能体获得的平均回报。
+
+从经验上看，选择 $b(s_t) = V^{\pi}(s_t)$ 具有降低策略梯度样本估计方差的理想效果。这可以实现更快、更稳定的策略学习。从概念角度来看，它也极具吸引力：它编码了这样一种直觉：如果代理获得了预期的结果，它应该对此“感觉”中立。
+
+实际上， $V^{\pi}(s_t)$ 无法精确计算，因此必须进行近似计算。这通常使用神经网络 $V_{\phi}(s_t)$ 来实现，该神经网络与策略同时更新（因此价值网络始终近似于最新策略的价值函数）。
+
+在大多数策略优化算法（包括 VPG、TRPO、PPO 和 A2C）的实现中，学习 $V_{\phi}$ 的最简单方法是最小化均方误差目标：
+
+$$
+\phi_k = \arg \min_{\phi} \underE{s_t, \hat{R}_t \sim \pi_k}{\left( V_{\phi}(s_t) - \hat{R}_t \right)^2},
+$$
+
+其中 $\pi_k$ 是第 $k$ 个周期的策略。这是通过一步或多步梯度下降完成的，从先前的值参数 $\phi_{k-1}$ 开始。
+
