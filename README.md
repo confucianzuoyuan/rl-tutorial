@@ -506,11 +506,144 @@ $$
 
 ## 实现最简单的策略梯度
 
-友情提醒！当我们谈论具有“logits”的分类分布时，我们的意思是，每个结果的概率由 `logits` 的 `Softmax` 函数给出。也就是说，在 `logits` 为 $x_j$ 的分类分布下，动作 $j$ 的概率为：
+1. 制定策略网络
 
-$$
-p_j = \frac{\exp(x_j)}{\sum_{i} \exp(x_i)}
-$$
+```py
+# make core of policy network
+logits_net = mlp(sizes=[obs_dim]+hidden_sizes+[n_acts])
+
+# make function to compute action distribution
+def get_policy(obs):
+    logits = logits_net(obs)
+    return Categorical(logits=logits)
+
+# make action selection function (outputs int actions, sampled from policy)
+def get_action(obs):
+    return get_policy(obs).sample().item()
+```
+
+此模块构建了使用前馈神经网络分类策略的模块和函数。（请参阅第一部分中的 “随机策略” 部分进行复习。） `logits_net` 模块的输出可用于构建对数概率和动作概率，而 `get_action` 函数则根据从对数计算出的概率对动作进行采样。（注意：此 `get_action` 函数假设只提供一个 `obs` ，因此只有一个整数动作输出。因此它使用了 `.item()` ，用于获取只有一个元素的张量的内容 。）
+
+本例中的很多工作是由 L36 上的 `Categorical` 对象完成的。这是一个 PyTorch Distribution 对象，它封装了一些与概率分布相关的数学函数。具体来说，它包含一个从分布中采样的方法（我们在 L40 上用到）和一个计算给定样本对数概率的方法（我们稍后会用到）。由于 PyTorch 分布对强化学习非常有用，请查看它们的文档来了解它们的工作原理。
+
+> 友情提醒！当我们谈论具有“logits”的分类分布时，我们的意思是，每个结果的概率由 `logits` 的 `Softmax` 函数给出。也就是说，在 `logits` 为 $x_j$ 的分类分布下，动作 $j$ 的概率为：
+>
+> $$
+> p_j = \frac{\exp(x_j)}{\sum_{i} \exp(x_i)}
+> $$
+
+2. 制定损失函数
+
+```py
+# make loss function whose gradient, for the right data, is policy gradient
+def compute_loss(obs, act, weights):
+    logp = get_policy(obs).log_prob(act)
+    return -(logp * weights).mean()
+```
+
+在这一块中，我们为策略梯度算法构建了一个“损失”函数。当插入正确的数据时，该损失的梯度等于策略梯度。正确的数据是指根据当前策略执行时收集的一组（状态、动作、权重）三元组，其中状态-动作对的权重是其所属情节的回报。（不过，正如我们将在后面的小节中展示的那样，你也可以为权重插入其他值，这些值同样可以正常工作。）
+
+> [!NOTE]
+> 关键点
+>
+> 尽管我们将其描述为损失函数，但它并非监督学习中典型意义上的损失函数。它与标准损失函数主要有两点区别。
+>
+> 1. **数据分布取决于参数**。 损失函数通常定义在固定的数据分布上，该分布与我们要优化的参数无关。但这里并非如此，数据必须基于最新的策略进行采样。
+>
+> 2. **它不衡量性能**。 损失函数通常评估我们关心的性能指标。在这里，我们关心的是预期收益 $J(\pi_{\theta})$ ，但我们的“损失”函数根本无法接近这个值，甚至在期望值上也是如此。这个“损失”函数对我们有用的唯一原因是，当使用当前参数生成的数据对当前参数进行评估时，它的性能梯度为负。
+>
+> 但在梯度下降的第一步之后，它就与性能不再有任何联系了。这意味着，对于给定的一批数据，最小化这个“损失”函数并不能保证预期收益的提升。你可以将这个损失设为 $-\infty$ ，策略性能可能会大幅下降；事实上，通常情况下确实如此。有时，深度强化学习研究人员可能会将这种结果描述为策略对一批数据的“过拟合”。这是描述性的，但不应从字面上理解，因为它并非泛化误差。
+>
+> 我们提出这一点是因为机器学习从业者常常将损失函数解读为训练过程中的一个有用信号——“如果损失下降，就万事大吉”。但在策略梯度下降中，这种直觉是错误的，你应该只关心平均收益。损失函数毫无意义。
+
+> [!NOTE]
+> 关键点
+>
+> 这里用来制作 `logp` 张量的方法——调用 PyTorch Categorical 对象的 `log_prob` 方法——可能需要进行一些修改才能与其他类型的分布对象一起使用。
+>
+> 例如，如果使用正态分布 （对于对角高斯策略），调用 `policy.log_prob(act)` 的输出将提供一个张量，其中包含每个向量值动作的每个分量的单独对数概率。也就是说，输入一个形状为 `(batch, act_dim)` 的张量，并得到一个形状为 `(batch, act_dim)` 的张量，而进行 RL 损失所需的是形状为 `(batch,)` 的张量。在这种情况下，将对动作分量的对数概率求和以获得动作的对数概率。也就是说，将计算：
+> ```py
+> logp = get_policy(obs).log_prob(act).sum(axis=-1)
+> ```
+
+3. 运行一个训练周期
+
+```py
+# for training policy
+def train_one_epoch():
+    # make some empty lists for logging.
+    batch_obs = []          # for observations
+    batch_acts = []         # for actions
+    batch_weights = []      # for R(tau) weighting in policy gradient
+    batch_rets = []         # for measuring episode returns
+    batch_lens = []         # for measuring episode lengths
+
+    # reset episode-specific variables
+    obs = env.reset()       # first obs comes from starting distribution
+    done = False            # signal from environment that episode is over
+    ep_rews = []            # list for rewards accrued throughout ep
+
+    # render first episode of each epoch
+    finished_rendering_this_epoch = False
+
+    # collect experience by acting in the environment with current policy
+    while True:
+
+        # rendering
+        if (not finished_rendering_this_epoch) and render:
+            env.render()
+
+        # save obs
+        batch_obs.append(obs.copy())
+
+        # act in the environment
+        act = get_action(torch.as_tensor(obs, dtype=torch.float32))
+        obs, rew, done, _ = env.step(act)
+
+        # save action, reward
+        batch_acts.append(act)
+        ep_rews.append(rew)
+
+        if done:
+            # if episode is over, record info about episode
+            ep_ret, ep_len = sum(ep_rews), len(ep_rews)
+            batch_rets.append(ep_ret)
+            batch_lens.append(ep_len)
+
+            # the weight for each logprob(a|s) is R(tau)
+            batch_weights += [ep_ret] * ep_len
+
+            # reset episode-specific variables
+            obs, done, ep_rews = env.reset(), False, []
+
+            # won't render again this epoch
+            finished_rendering_this_epoch = True
+
+            # end experience loop if we have enough of it
+            if len(batch_obs) > batch_size:
+                break
+
+    # take a single policy gradient update step
+    optimizer.zero_grad()
+    batch_loss = compute_loss(obs=torch.as_tensor(batch_obs, dtype=torch.float32),
+                              act=torch.as_tensor(batch_acts, dtype=torch.int32),
+                              weights=torch.as_tensor(batch_weights, dtype=torch.float32)
+                              )
+    batch_loss.backward()
+    optimizer.step()
+    return batch_loss, batch_rets, batch_lens
+```
+
+`train_one_epoch()` 函数运行一个“epoch”的策略梯度，我们将其定义为
+
+1. 经验收集步骤（L67-102），其中代理使用最新的策略在环境中执行一定数量的情节，然后
+2. 单个策略梯度更新步骤（L104-111）。
+
+算法的主循环只是重复调用 `train_one_epoch()` 。
+
+> 如果你还不熟悉 PyTorch 中的优化，请观察第 104-111 行所示的梯度下降步骤模式。首先，清除梯度缓冲区。然后，计算损失函数。接着，计算损失函数的反向传播；这会将新的梯度累积到梯度缓冲区中。最后，使用优化器进行下一步。
+
+
 
 原始策略梯度算法的实现代码。
 
