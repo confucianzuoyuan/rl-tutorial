@@ -445,17 +445,25 @@ Q 学习方法的例子包括
 
 ## 推导最简单的策略梯度
 
-这里，我们考虑随机参数化策略 $\pi_{\theta}$ 的情况。我们的目标是最大化预期收益 $J(\pi_{\theta}) = \underset{\tau \sim \pi_{\theta}}E{R(\tau)}$ 。为了便于推导，我们取 $R(\tau)$ 来表示有限期限下的未折现收益 ，但无限期限下的折现收益的推导过程几乎相同。
+这里，我们考虑随机参数化策略 $\pi_{\theta}$ 的情况。我们的目标是最大化预期收益 $J(\pi_{\theta}) = \underset{\tau \sim \pi_{\theta}}E[{R(\tau)}]$ 。为了便于推导，我们取 $R(\tau)$ 来表示有限期限下的没有折扣的收益 ，但无限期限下的有折扣的收益的推导过程几乎相同。
 
-我们希望通过梯度上升来优化策略，例如
+我们希望通过 **梯度上升** 来优化策略，例如
 
 $$
 \theta_{k+1} = \theta_k + \alpha \left. \nabla_{\theta} J(\pi_{\theta}) \right|_{\theta_k}.
 $$
 
-策略性能的梯度 $\nabla_{\theta} J(\pi_{\theta})$ 称为策略梯度 ，以这种方式优化策略的算法称为策略梯度算法。 （例如 Vanilla 策略梯度和 TRPO。PPO 通常被称为策略梯度算法，尽管这种说法略有不准确。）
+策略性能的梯度 $\nabla_{\theta} J(\pi_{\theta})$ 称为 **策略梯度** ，以这种方式优化策略的算法称为 **策略梯度算法** 。
 
-要实际使用该算法，我们需要一个可以数值计算的策略梯度表达式。这涉及两个步骤：1）推导策略性能的解析梯度，该解析梯度最终呈现为期望值的形式；2）形成该期望值的样本估计值，该样本估计值可以通过有限数量的代理-环境交互步骤的数据计算得出。
+- 最简单的策略梯度算法
+- PPO（近端策略优化算法）
+- DPO（直接策略优化算法）
+- GRPO（组相对策略优化算法）
+
+要实际使用该算法，我们需要一个可以数值计算的策略梯度表达式。这涉及两个步骤：
+
+1. 推导策略性能的解析梯度，该解析梯度最终呈现为期望值的形式；
+2. 形成该期望值的样本估计值，该样本估计值可以通过有限数量的代理-环境交互步骤的数据计算得出。
 
 在本小节中，我们将找到该表达式的最简形式。在后面的小节中，我们将展示如何改进该最简形式，以获得我们在标准策略梯度实现中实际使用的版本。
 
@@ -484,14 +492,17 @@ $$
 5. 轨迹的梯度对数概率。 轨迹的对数概率的梯度如下
 
 $$
+\begin{split}
 \nabla_{\theta} \log P(\tau | \theta) &= \cancel{\nabla_{\theta} \log \rho_0 (s_0)} + \sum_{t=0}^{T} \bigg( \cancel{\nabla_{\theta} \log P(s_{t+1}|s_t, a_t)}  + \nabla_{\theta} \log \pi_{\theta}(a_t |s_t)\bigg) \\
 &= \sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t).
+\end{split}
 $$
 
 综合起来，我们得出以下结论：
 
 > [!NOTE]
 > 基于策略梯度的推导
+>
 > ![](./images/2.svg)
 
 这是一个期望，这意味着我们可以用样本均值来估计它。如果我们收集一组轨迹 $\mathcal{D} = \{\tau_i\}_{i=1,...,N}$ ，其中每条轨迹都是通过让代理使用策略 $\pi_{\theta}$ 在环境中行动而获得的，那么策略梯度可以用以下公式来估计：
@@ -504,9 +515,9 @@ $$
 
 最后一个表达式是我们想要的可计算表达式的最简单版本。假设我们已经以一种允许计算 $\nabla_{\theta} \log \pi_{\theta}(a|s)$ 的方式表示了我们的策略，并且如果我们能够在环境中运行该策略来收集轨迹数据集，那么我们就可以计算策略梯度并采取更新步骤。
 
-## 实现最简单的策略梯度
+# 第四章 最简单的策略梯度算法
 
-1. 制定策略网络
+1. 实现策略网络
 
 ```py
 # make core of policy network
@@ -522,17 +533,19 @@ def get_action(obs):
     return get_policy(obs).sample().item()
 ```
 
-此模块构建了使用前馈神经网络分类策略的模块和函数。（请参阅第一部分中的 “随机策略” 部分进行复习。） `logits_net` 模块的输出可用于构建对数概率和动作概率，而 `get_action` 函数则根据从对数计算出的概率对动作进行采样。（注意：此 `get_action` 函数假设只提供一个 `obs` ，因此只有一个整数动作输出。因此它使用了 `.item()` ，用于获取只有一个元素的张量的内容 。）
+此模块构建了使用前馈神经网络分类策略的模块和函数。（请参阅第一章中的 “随机策略” 部分进行复习。） `logits_net` 模块的输出可用于构建对数概率和动作概率，而 `get_action` 函数则根据从对数计算出的概率对动作进行采样。（注意：此 `get_action` 函数假设只提供一个 `obs` ，因此只有一个整数动作输出。因此它使用了 `.item()` ，用于获取只有一个元素的张量的内容 。）
 
 本例中的很多工作是由 L36 上的 `Categorical` 对象完成的。这是一个 PyTorch Distribution 对象，它封装了一些与概率分布相关的数学函数。具体来说，它包含一个从分布中采样的方法（我们在 L40 上用到）和一个计算给定样本对数概率的方法（我们稍后会用到）。由于 PyTorch 分布对强化学习非常有用，请查看它们的文档来了解它们的工作原理。
 
+> [!NOTE]
+>
 > 友情提醒！当我们谈论具有“logits”的分类分布时，我们的意思是，每个结果的概率由 `logits` 的 `Softmax` 函数给出。也就是说，在 `logits` 为 $x_j$ 的分类分布下，动作 $j$ 的概率为：
 >
 > $$
 > p_j = \frac{\exp(x_j)}{\sum_{i} \exp(x_i)}
 > $$
 
-2. 制定损失函数
+2. 实现损失函数
 
 ```py
 # make loss function whose gradient, for the right data, is policy gradient
@@ -642,8 +655,6 @@ def train_one_epoch():
 算法的主循环只是重复调用 `train_one_epoch()` 。
 
 > 如果你还不熟悉 PyTorch 中的优化，请观察第 104-111 行所示的梯度下降步骤模式。首先，清除梯度缓冲区。然后，计算损失函数。接着，计算损失函数的反向传播；这会将新的梯度累积到梯度缓冲区中。最后，使用优化器进行下一步。
-
-
 
 原始策略梯度算法的实现代码。
 
@@ -804,7 +815,7 @@ Expected Grad-Log-Prob Lemma
 EGLP 引理。 假设 $P_{\theta}$ 是随机变量 $x$ 的参数化概率分布。则：
 
 $$
-\underset{x \sim P_{\theta}}E{\nabla_{\theta} \log P_{\theta}(x)} = 0.
+\underset{x \sim P_{\theta}}E[{\nabla_{\theta} \log P_{\theta}(x)}] = 0.
 $$
 
 > 证明：
@@ -822,12 +833,14 @@ $$
 > $$
 > 
 > 使用对数导数技巧可得到：
-> 
+>
 > $$
+> \begin{split}
 > 0 &= \nabla_{\theta} \int_x P_{\theta}(x) \\
 > &= \int_x \nabla_{\theta} P_{\theta}(x) \\
 > &= \int_x P_{\theta}(x) \nabla_{\theta} \log P_{\theta}(x) \\
 > \therefore 0 &= \underset{x \sim P_{\theta}}E{\nabla_{\theta} \log P_{\theta}(x)}.
+> \end{split}
 > $$
 > 
 
@@ -836,7 +849,7 @@ $$
 检查我们最新的策略梯度表达式：
 
 $$
-\nabla_{\theta} J(\pi_{\theta}) = \underset{\tau \sim \pi_{\theta}}E{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) R(\tau)}.
+\nabla_{\theta} J(\pi_{\theta}) = \underset{\tau \sim \pi_{\theta}}E[{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) R(\tau)}].
 $$
 
 按照这个梯度迈出一步，每个动作的对数概率都会与 $R(\tau)$ （所有获得奖励的总和）成比例地上升。但这没有多大意义。
@@ -846,7 +859,7 @@ $$
 事实证明，这种直觉在数学上是成立的，我们可以证明策略梯度也可以表示为
 
 $$
-\nabla_{\theta} J(\pi_{\theta}) = \underset{\tau \sim \pi_{\theta}}E{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) \sum_{t'=t}^T R(s_{t'}, a_{t'}, s_{t'+1})}.
+\nabla_{\theta} J(\pi_{\theta}) = \underset{\tau \sim \pi_{\theta}}E[{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) \sum_{t'=t}^T R(s_{t'}, a_{t'}, s_{t'+1})}].
 $$
 
 在这种形式下，行动只会根据采取行动后获得的奖励而得到强化。
@@ -895,13 +908,13 @@ def reward_to_go(rews):
 EGLP 引理的一个直接推论是，对于任何仅依赖于状态的函数 $b$ ，
 
 $$
-\underset{a_t \sim \pi_{\theta}}E{\nabla_{\theta} \log \pi_{\theta}(a_t|s_t) b(s_t)} = 0.
+\underset{a_t \sim \pi_{\theta}}E[{\nabla_{\theta} \log \pi_{\theta}(a_t|s_t) b(s_t)}] = 0.
 $$
 
 这使我们能够在策略梯度表达式中添加或减去任意数量的类似项，而无需改变其期望值：
 
 $$
-\nabla_{\theta} J(\pi_{\theta}) = \underset{\tau \sim \pi_{\theta}}E{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) \left(\sum_{t'=t}^T R(s_{t'}, a_{t'}, s_{t'+1}) - b(s_t)\right)}.
+\nabla_{\theta} J(\pi_{\theta}) = \underset{\tau \sim \pi_{\theta}}E[{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) \left(\sum_{t'=t}^T R(s_{t'}, a_{t'}, s_{t'+1}) - b(s_t)\right)}]
 $$
 
 任何以此方式使用的函数 $b$ 都称为基线 。
@@ -915,7 +928,7 @@ $$
 在大多数策略优化算法（包括 VPG、TRPO、PPO 和 A2C）的实现中，学习 $V_{\phi}$ 的最简单方法是最小化均方误差目标：
 
 $$
-\phi_k = \arg \min_{\phi} \underset{s_t, \hat{R}_t \sim \pi_k}E{\left( V_{\phi}(s_t) - \hat{R}_t \right)^2},
+\phi_k = \arg \min_{\phi} \underset{s_t, \hat{R}_t \sim \pi_k}E[{\left( V_{\phi}(s_t) - \hat{R}_t \right)^2}]
 $$
 
 其中 $\pi_k$ 是第 $k$ 个周期的策略。这是通过一步或多步梯度下降完成的，从先前的值参数 $\phi_{k-1}$ 开始。
@@ -925,7 +938,7 @@ $$
 到目前为止，我们已经看到策略梯度具有一般形式
 
 $$
-\nabla_{\theta} J(\pi_{\theta}) = \underset{\tau \sim \pi_{\theta}}E{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) \Phi_t},
+\nabla_{\theta} J(\pi_{\theta}) = \underset{\tau \sim \pi_{\theta}}E[{\sum_{t=0}^{T} \nabla_{\theta} \log \pi_{\theta}(a_t |s_t) \Phi_t}]
 $$
 
 其中 $\Phi_t$ 可以是以下任意一项
@@ -965,7 +978,3 @@ $$
 也是有效的。证明是，它等价于使用 $\Phi_t = Q^{\pi_{\theta}}(s_t, a_t)$ ，然后使用价值函数基线，我们始终可以自由地这样做。
 
 使用优势函数来制定策略梯度是非常常见的，并且存在许多不同的方法来估计不同算法所使用的优势函数。
-
-如需更详细地了解该主题，您应该阅读有关广义优势估计 (GAE) 的论文，其中深入探讨了背景部分中 $\Phi_t$ 的不同选择。
-
-这篇论文接着描述了 GAE，这是一种在策略优化算法中近似优势函数的方法，被广泛使用。例如，Spinning Up 的 VPG、TRPO 和 PPO 实现就使用了 GAE。因此，我们强烈建议您研究一下 GAE。
