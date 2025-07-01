@@ -1011,3 +1011,50 @@ $$
 也是有效的。证明是，它等价于使用 $\Phi_t = Q^{\pi_{\theta}}(s_t, a_t)$ ，然后使用价值函数基线，我们始终可以自由地这样做。
 
 使用优势函数来制定策略梯度是非常常见的，并且存在许多不同的方法来估计不同算法所使用的优势函数。
+
+这段代码是强化学习中经典的 **REINFORCE** 算法计算策略梯度损失的部分，具体含义如下：
+
+```python
+loss = 0
+for log_prob, R in zip(log_probs, discounted_rewards):
+    loss -= log_prob * R  # REINFORCE loss
+```
+
+---
+
+## 逐项解释
+
+- `log_probs`：一个列表，包含智能体在一条轨迹（episode）中每一步选择动作的对数概率 \(\log \pi_\theta(a_t|s_t)\)。
+- `discounted_rewards`：对应每一步的折扣累计奖励 \(R_t = \sum_{k=0}^\infty \gamma^k r_{t+k}\)，反映从当前步开始未来的总回报。
+- `zip(log_probs, discounted_rewards)`：将每一步的对数概率和对应的折扣奖励配对。
+
+---
+
+## REINFORCE 损失函数含义
+
+REINFORCE 算法的目标是最大化期望回报，等价于最小化下面的损失：
+
+\[
+L(\theta) = - \sum_t \log \pi_\theta(a_t|s_t) \cdot R_t
+\]
+
+- 这里 \(\theta\) 是策略参数。
+- \(\log \pi_\theta(a_t|s_t)\) 是策略在状态 \(s_t\) 下选择动作 \(a_t\) 的对数概率。
+- \(R_t\) 是从时间步 \(t\) 开始的折扣累计奖励。
+
+---
+
+## 代码中实现
+
+- `loss` 初始为0。
+- 对每一步，计算 \(- \log \pi_\theta(a_t|s_t) \times R_t\)，累加到 `loss`。
+- 负号是因为我们用梯度下降去最小化 `loss`，而实际上是最大化期望回报。
+
+---
+
+## 作用
+
+- 通过对 `loss` 求梯度并反向传播，更新策略参数，使得高回报的动作概率被提升，低回报的动作概率被降低。
+- 这是策略梯度方法的核心。
+
+---
