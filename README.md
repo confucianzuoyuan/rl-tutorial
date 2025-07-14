@@ -669,13 +669,14 @@ agent = Agent()
 reward_history = []
 
 for episode in range(3000):
-    state = env.reset()
+    state, _ = env.reset()
     done = False
     total_reward = 0
 
     while not done:
         action, prob = agent.get_action(state)
-        next_state, reward, done, info = env.step(action)
+        next_state, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
 
         agent.add(reward, prob)
         state = next_state
