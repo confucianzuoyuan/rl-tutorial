@@ -687,16 +687,60 @@ for episode in range(3000):
     reward_history.append(total_reward)
     if episode % 100 == 0:
         print("episode :{}, total reward : {:.1f}".format(episode, total_reward))
+
+torch.save(agent.pi.state_dict(), 'policy_model.pth')
+print("模型已保存")
 ```
 
 首先，在 `while` 语句中，增加智能代理获得的奖励（reward）和行动的概率（prob）。然后在离开 `while` 语句后（回合结束时），通过 `agent.update()` 更新策略。
 
 运行此代码，随着回合的推进，获得的奖励也会增加。下图是结果的示意图。
 
-如图所示，虽然变动很剧烈，但随着回合的推进，结果越变越好。 不过，由于上图只是一次实验的结果，因此结果可能不可靠。于是，我
-们进行了 100 次实验，然后取平均值，结果如下图所示。
+绘制示意图的代码如下：
 
-从上图中可以看出，随着回合的推进，奖励的总和会逐渐增加。但即使经历了 3000 个回合，依然没有达到这次任务的上限值 200 ，似乎还有改进的余地。下面让我们来改进一下这里推导的最简单的策略梯度法。这个改进算法就是著名的“REINFORCE”算法。
+```py
+import matplotlib.pyplot as plt
+# 训练结束后绘制奖励变化图
+plt.plot(reward_history)
+plt.xlabel('Episode')
+plt.ylabel('Total Reward')
+plt.title('Reward per Episode')
+plt.grid(True)
+plt.show()
+```
+
+![](images/Figure_1.png)
+
+我们来测试一下这个倒立摆
+
+```py
+def test_render(agent, env, episodes=5):
+    for episode in range(episodes):
+        state, _ = env.reset()
+        done = False
+        total_reward = 0
+        while not done:
+            env.render()
+            action, _ = agent.get_action(state)
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            state = next_state
+            total_reward += reward
+        print(f"Test Episode {episode + 1}: Total Reward = {total_reward}")
+    env.close()
+
+# 加载模型后测试
+env = gym.make('CartPole-v1', render_mode='human')
+agent = Agent()
+agent.pi.load_state_dict(torch.load('policy_model.pth'))
+agent.pi.eval()
+test_render(agent, env)
+```
+
+如图所示，虽然变动很剧烈，但随着回合的推进，结果越变越好。不过，由于上图只是一次实验的结果，因此结果可能不可靠。所以，我
+们可以进行 100 次实验，然后取平均值。大家可以试一下。
+
+我们大概可以知道，随着回合的推进，奖励的总和会逐渐增加。但即使经历了 3000 个回合，依然没有达到这次任务的上限值，似乎还有改进的余地。下面让我们来改进一下这里推导的最简单的策略梯度法。这个改进算法就是著名的“REINFORCE”算法。
 
 
 # 第四章 PPO（近端策略优化）
