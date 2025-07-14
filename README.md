@@ -523,7 +523,170 @@ $$
 
 为了简单起见，本章将使用以上面的式子为对象的策略梯度法。上面的式子的计算就是对所有时刻（$t=0\sim T$）求 $\nabla_{\theta}\log\pi_{\theta}(A_t|S_t)$ ，然后将各梯度乘以作为权重的收益 $G(\tau)$ ，最后求它们的和。这个计算过程如下图所示。
 
+![](images/pg.svg)
 
+下面来思考一下图中所做的计算的意义。首先，根据 $\log$ 的微分，有以下式子成立。
+
+$$
+\nabla_{\theta}\log{\pi_{\theta}}(A_t|S_t)=\frac{\nabla_{\theta}\pi_{\theta}(A_t|S_t)}{\pi_{\theta}(A_t|S_t)}
+$$
+
+如上式所示，$\nabla_{\theta}\log{\pi_{\theta}}(A_t|S_t)$ 是梯度 $\nabla_{\theta}\pi_{\theta}(A_t|S_t)$ 的 $\frac{1}{\pi_{\theta}(A_t|S_t)}$ 倍。所以 $\nabla_{\theta}\log{\pi_{\theta}}(A_t|S_t)$ 和 $\nabla_{\theta}\pi_{\theta}(A_t|S_t)$ 会指向相同的方向。也就是说，$\nabla_{\theta}\log{\pi_{\theta}}(A_t|S_t)$ 和 $\nabla_{\theta}\pi_{\theta}(A_t|S_t)$ 都指向在状态 $S_t$ 下采取行动 $A_t$ 的概率增加的最快的方向。根据 $G(\tau)\nabla_{\theta}\log\pi_{\theta}(A_t|S_t)$ ，需要在该方向上乘以权重 $G(\tau)$ 。
+
+假设智能代理获得的收益 $G(\tau)$ 是 $100$ 。那么，在这种情况下，在这期间采取的行动将更容易被选择，权重会被增强 $100$ 倍。也就是说，在顺利的情况下，在此之前采取的行动会相应地增强。反之，在不顺利的情况下，在这期间采取的行动会相应地减弱。
+
+### 策略梯度法的实现
+
+下面让我们将话题转到最简单的策略梯度法的实现。首先是 `import` 语句和表示策略的神经网络的代码。
+
+```py
+import numpy as np
+import gym
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.distributions import Categorical
+
+
+class Policy(nn.Module):
+    def __init__(self, action_size):
+        super().__init__()
+        self.l1 = nn.Linear(4, 128)
+        self.l2 = nn.Linear(128, action_size)
+
+    def forward(self, x):
+        x = F.relu(self.l1(x))
+        x = F.softmax(self.l2(x), dim=1)
+        return x
+```
+
+这里实现的神经网络模型由两层全连接层构成。最终输出的元素数是行动的数量（ `action_size` ）。由于这个最终输出是 `Softmax` 函数的输出，因此可以得到每个行动的概率。
+
+> [!NOTE]
+> 如果将具有 $n$ 个元素的向量输入到 `Softmax` 函数中，那么输出的同样是具有 $n$ 个元素的向量。此时，第 $i$ 个输出 $y_i$ 的式子如下所示。
+> $$
+> y_i = \frac{\mathrm{e}^{x_i}}{\sum_{k=1}^n\mathrm{e}^{x_k}}
+> $$
+> 这里的 $\mathrm{e}$ 是自然常数(值为 $2.718 28...$ 的无限小数)。`Softmax` 函数的输出值全部为 $0$ 以上 $1$ 以下的实数，它们的合计值为 $1$（$\sum_{i=1}^ny_i=1$）。因此，`Softmax` 函数的输出可以作为概率使用。
+
+下面是 `Agent` 类的代码。首先显示初始化和 `get_action` 方法。
+
+```py
+class Agent:
+    def __init__(self):
+        self.gamma = 0.98
+        self.lr = 0.0002
+        self.action_size = 2
+
+        self.memory = []
+        self.pi = Policy(self.action_size)
+        self.optimizer = optim.Adam(self.pi.parameters(), lr=self.lr)
+
+    def get_action(self, state):
+        state = torch.tensor(state[np.newaxis, :])
+        probs = self.pi(state)
+        probs = probs[0]
+        m = Categorical(probs)
+        action = m.sample().item()
+        return action, probs[action]
+```
+
+`get_action` 方法决定了在 `state` 状态下采取的行动。为此，可以通过 `self.pi(state)` 进行神经网络的前向传播，得到概率分布 `probs` 。然后，基于该概率分布，进行一次行动的采样。该方法还返回了所选行动的概率（上面代码中的 `probs[action]` ）。
+
+下面来试用一下 `get_action` 方法。代码如下所示。
+
+```py
+env = gym.make('CartPole-v1')
+state, _ = env.reset()
+agent = Agent()
+
+action, prob = agent.get_action(state)
+print('action: ', action)
+print('prob: ', prob)
+
+G = 100.0 # 虚拟权重
+J = G * prob.log()
+print('J: ', J)
+
+# 求梯度
+J.backward()
+```
+
+输出结果
+
+```
+action:  1
+prob:  tensor(0.4186, grad_fn=<SelectBackward0>)
+J:  tensor(-87.0858, grad_fn=<MulBackward0>)
+```
+
+上面的代码取出了初始状态下的行动及其概率。另外，它还显示了使用虚拟的权重来计算由下式表示的梯度的代码（这是从式子取出的 $t = 0$ 的相关项的式子）。
+
+$$
+G(\tau)\nabla_{\theta}\log\pi_{\theta}(A_0|S_0)
+$$
+
+作为参考，下面对照列出了上面的代码中出现的变量与相应的数学式。
+
+- `prob` ： $\pi_{\theta}(A_0|S_0)$
+- `G` ： $G(\tau)$
+- `J` ： $G(\tau)\log\pi_{\theta}(A_0|S_0)$
+
+求出 `J` 之后，通过 `J.backward()` 求 $G(\tau)\nabla_{\theta}\log\pi_{\theta}(A_0|S_0)$ 。下面是 `Agent` 类剩下的代码。
+
+```py
+class Agent:
+    ...
+
+    def add(self, reward, prob):
+        data = (reward, prob)
+        self.memory.append(data)
+
+    def update(self):
+        G, loss = 0, 0
+        for reward, prob in reversed(self.memory):
+            G = reward + self.gamma * G
+
+        for reward, prob in self.memory:
+            loss += - prob.log() * G
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        self.memory = [] # 重置内存
+```
+
+`add` 方法是智能代理每次采取行动并获得奖励时被调用的方法。该方法将奖励（ `reward` ）和智能代理采取的行动的概率（ `prob` ）存储在内存（ `self.memory` ）中。`update` 方法是智能代理到达目标时被调用的方法。该方法首先会求收益 `G` 。收益可以通过反向计算获得的奖励的做法来髙效地计算。然后该方法会计算损失函数。具体做法是对每个时刻求 `-prob.log()` ，再将其乘以作为权重的 `G` ，之后求它们的和。剩下的就是一直以来的神经网络的训练代码。
+
+在训练神经网络时，通常要设置损失函数。对于这个例子，我们可以将目标函数 $J(\theta)$ 乘以 $-1$ 所得到的 $-J(\theta)$ 作为损失函数，此时可以通过梯度下降法的最优化方法(SGD、Adam等)更新参数。
+
+最后在倒立摆环境中运行智能代理。代码如下所示。
+
+```py
+env = gym.make('CartPole-v1')
+agent = Agent()
+reward_history = []
+
+for episode in range(3000):
+    state = env.reset()
+    done = False
+    total_reward = 0
+
+    while not done:
+        action, prob = agent.get_action(state)
+        next_state, reward, done, info = env.step(action)
+
+        agent.add(reward, prob)
+        state = next_state
+        total_reward += reward
+
+    agent.update()
+
+    reward_history.append(total_reward)
+    if episode % 100 == 0:
+        print("episode :{}, total reward : {:.1f}".format(episode, total_reward))
+```
 
 # 第四章 PPO（近端策略优化）
 
