@@ -742,6 +742,65 @@ test_render(agent, env)
 
 我们大概可以知道，随着回合的推进，奖励的总和会逐渐增加。但即使经历了 3000 个回合，依然没有达到这次任务的上限值，似乎还有改进的余地。下面让我们来改进一下这里推导的最简单的策略梯度法。这个改进算法就是著名的“REINFORCE”算法。
 
+## REINFORCE
+
+REINFORCE是对上一节的策略梯度法的改进算法。本节首先会基于数学式推导REINFORCE算法，然后会通过修改之前的部分代码的做法来实现 REINFORCE 。
+
+> [!NOTE]
+> REINFORCE 这个名字是"REward Increment = Nonnegative Factor x Offset Reinforcement x Characteristic Eligibility"（奖励增量=非负因子x偏移强化x特征资格）的首字母缩写。
+
+### REINFORCE 算法
+
+先来复习一下第一节。最简单的梯度策略法是基于下面的公式实现的。
+
+$$
+\begin{split}
+\nabla_{\theta}J(\theta) &= \nabla_{\theta}E_{\tau\sim\pi_{\theta}}[G(\tau)] \\
+                         &= E_{\tau\sim\pi_{\theta}}[\sum_{t=0}^TG(\tau)\nabla_{\theta}\log\pi_{\theta}(A_t|S_t)]
+\end{split}
+$$
+
+上面的式子中的 $G(\tau)$ 是目前为止获得的所有奖励的总和（准确地说是“带折现率”的奖励的总和）。这里要思考的问题是，无论在哪个时刻 $t$ ，式子中都是 $G(\tau)\nabla_{\theta}\log\pi_{\theta}(A_t|S_t)$ ，我们始终会使用固定不变的权重 $G(\tau)$ 来增加（或减少）采取行动 $A_t$ 的概率。
+
+智能代理行动的好坏是根据行动之后获得的奖励总和来评估的（回顾一下价值函数的定义）。反过来说，采取某个行动之前获得的奖励与该行动的好坏无关。如果要评估在某个时刻 $t$ 采取的行动 $A_t$ ，那么在此之前做了什么以及获得了多少奖励都无所谓。我们是根据采取行动 $A_t$ 之后的结果（在时刻 $t$ 以后获得的奖励的总和）来判断行动 $A_t$ 的好坏的。
+
+上面的式子中行动 $A_t$ 的权重是 $G(\tau)$ 。这个权重 $G(\tau)$ 包括在时刻 $t$ 之前的奖励。也就是说，原本不相关的奖励作为噪声数据包含在内了。为了改进这一点（去除噪声数据），可以对权重 $G(\tau)$ 作如下修改。
+
+$$
+\nabla_{\theta}J(\theta)=E_{\tau\sim\pi_{\theta}}[\sum_{t=0}^TG_t\nabla_{\pi}\log\pi_{\theta}(A_t|S_t)] \\
+G_t = R_t + \gamma R_{t+1} + \cdots + \gamma^{T-1}R_T
+$$
+
+如式所示，权重变成了 $G_t$ 。权重 $G_t$ 是在时刻 $t\sim T$ 获得的奖励的总和。因此，选择行动 $A_t$ 的概率将由不包含时刻 $t$ 之前的奖励的权重 $G_t$ 增强。 这就是改进第一节的策略梯度法的思路。基于上式的算法叫作REINFORCE。
+
+> [!NOTE]
+> 基于上式的REINFORCE算法优于最简单的策略梯度法（基于第一节的公式的算法）。通过无限增加的样本数，两个公式都会收敛到正确的 $\nabla_{\theta}J(\theta)$ （可以说是无偏差的）。但第一个公式的方差更大，因为公式中的权重包含了无关的数据（噪声）。
+
+### REINFORCE 的实现
+
+由于REINFORCE的方差小，因此即使数据样本少，也能高精度地近似数据。下面我们来实现REINFORCE以验证其精度。REINFORCE的代码与上一节中的代码基本相同，不同之处只有 `Agent` 类的 `update` 方法。下面仅列出了不同部分的代码。
+
+```py
+class Agent:
+    ...
+
+    def update(self):
+        G, loss = 0, 0
+        for reward, prob in reversed(self.memory):
+            G = reward + self.gamma * G
+            loss += - prob.log() * G
+        
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        self.memory = []
+```
+
+`self.memory` 是按先后顺序保存智能代理获得的奖励(reward)和行动概率(prob)的列表。上面的代码按从后向前的顺序依次访问了 `self.memory` 的元素，并计算了每个时刻的 `G` 。
+
+下面显示运行一次的结果。
+
+从图中可以看出，随着回合的推进，奖励的总和会逐渐增加。与上一次的结果相比，不但训练稳定了，训练速度也提高了。
 
 # 第四章 PPO（近端策略优化）
 
