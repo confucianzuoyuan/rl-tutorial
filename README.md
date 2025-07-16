@@ -1515,9 +1515,7 @@ class PPO:
         # 观察值经过actor网络的计算，返回均值动作。
         mean = self.actor(obs)
 
-        # Create a distribution with the mean action and std from the covariance matrix above.
-        # For more information on how this distribution works, check out Andrew Ng's lecture on it:
-        # https://www.youtube.com/watch?v=JjB58InuTqM
+        # 使用均值动作和上面定义的协方差矩阵的标准差创建一个多元正态分布
         dist = MultivariateNormal(mean, self.cov_mat)
 
         # 从分布中采样一个动作出来
@@ -1596,28 +1594,20 @@ class PPO:
         for param, val in hyperparameters.items():
             exec('self.' + param + ' = ' + str(val))
 
-        # Sets the seed if specified
+        # 设置随机数种子
         if self.seed != None:
-            # Check if our seed is valid first
+            # 确保随机数种子是合法的。
             assert (type(self.seed) == int)
 
-            # Set the seed
+            # 设置随机数种子
             torch.manual_seed(self.seed)
             print(f"Successfully set seed to {self.seed}")
 
     def _log_summary(self):
         """
-                Print to stdout what we've logged so far in the most recent batch.
-
-                Parameters:
-                        None
-
-                Return:
-                        None
+        打印日志
         """
-        # Calculate logging values. I use a few python shortcuts to calculate each value
-        # without explaining since it's not too important to PPO; feel free to look it over,
-        # and if you have any questions you can email me (look at bottom of README)
+        # 计算要打印的日志数据，不重要。
         delta_t = self.logger['delta_t']
         self.logger['delta_t'] = time.time_ns()
         delta_t = (self.logger['delta_t'] - delta_t) / 1e9
@@ -1631,12 +1621,12 @@ class PPO:
         avg_actor_loss = np.mean([losses.float().mean()
                                  for losses in self.logger['actor_losses']])
 
-        # Round decimal places for more aesthetic logging messages
+        # 将数据取整，打印起来比较好看
         avg_ep_lens = str(round(avg_ep_lens, 2))
         avg_ep_rews = str(round(avg_ep_rews, 2))
         avg_actor_loss = str(round(avg_actor_loss, 5))
 
-        # Print logging statements
+        # 打印日志
         print(flush=True)
         print(
             f"-------------------- Iteration #{i_so_far} --------------------", flush=True)
@@ -1648,7 +1638,7 @@ class PPO:
         print(f"------------------------------------------------------", flush=True)
         print(flush=True)
 
-        # Reset batch-specific logging data
+        # 清空日志数据
         self.logger['batch_lens'] = []
         self.logger['batch_rews'] = []
         self.logger['actor_losses'] = []
