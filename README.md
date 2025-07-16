@@ -1136,7 +1136,95 @@ PPO 使用 N 个并行 Actor 来运行策略，每个 Actor 都会收集数据�
 
 ## 3. 代码实现
 
+首先创建文件夹 `ppo-tutorial` 。
 
+创建文件 `ppo-tutorial/arguments.py` 。其中包含命令行解析程序。
+
+```py
+"""
+本文件包含了要解析的命令行参数
+`main.py` 将调用 `get_args` ，
+`get_args` 返回解析好的参数。
+"""
+import argparse
+
+
+def get_args():
+    """
+    Description:
+    Parses arguments at command line.
+
+    Parameters: None
+    Return: args - the arguments parsed
+    """
+    parser = argparse.ArgumentParser()
+
+    # 可以是 'train' 或者 'test'
+    parser.add_argument('--mode', dest='mode', type=str, default='train')
+    parser.add_argument('--actor_model', dest='actor_model',
+                        type=str, default='')     # actor演员模型的文件名
+    parser.add_argument('--critic_model', dest='critic_model',
+                        type=str, default='')   # critic评论家模型的文件名
+
+    args = parser.parse_args()
+
+    return args
+```
+
+创建文件 `ppo-tutorial/network.py` 。其中包含用来定义actor模型和critic模型的网络结构。
+
+```py
+"""
+本文件包含了一个神经网络模块
+用来定义PPO中的actor和critic的模型结构
+"""
+
+import torch
+from torch import nn
+import torch.nn.functional as F
+import numpy as np
+
+
+class FeedForwardNN(nn.Module):
+    """
+    一个标准的 `in_dim-64-64-out_dim` 的前馈神经网络
+    """
+
+    def __init__(self, in_dim, out_dim):
+        """
+        初始化网络结构，配置网络层
+
+        Parameters:
+            in_dim - 输入维度
+            out_dim - 输出维度
+
+        Return:
+            None
+        """
+        super(FeedForwardNN, self).__init__()
+
+        self.layer1 = nn.Linear(in_dim, 64)
+        self.layer2 = nn.Linear(64, 64)
+        self.layer3 = nn.Linear(64, out_dim)
+
+    def forward(self, obs):
+        """
+        前向传播
+
+        Parameters: obs - observation，观察值作为输入参数
+
+        Return: output - 前向输出
+        """
+        # 如果观察值是 `np.ndarray` ，转换成 `torch.tensor` 。
+        if isinstance(obs, np.ndarray):
+            obs = torch.tensor(obs, dtype=torch.float)
+
+        activation1 = F.relu(self.layer1(obs))
+        activation2 = F.relu(self.layer2(activation1))
+        output = self.layer3(activation2)
+
+        return output
+```
 
 # 第四章 DPO（直接策略优化）
 
