@@ -1314,24 +1314,24 @@ class PPO:
             f"Learning... Running {self.max_timesteps_per_episode} timesteps per episode, ", end='')
         print(
             f"{self.timesteps_per_batch} timesteps per batch for a total of {total_timesteps} timesteps")
-        t_so_far = 0  # Timesteps simulated so far
-        i_so_far = 0  # Iterations ran so far
+        t_so_far = 0  # 模拟的时间步数
+        i_so_far = 0  # 迭代次数
         # 算法的第二行
         while t_so_far < total_timesteps:
             # 算法的第3行，根据我们的策略收集轨迹
             batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens = self.rollout()
 
-            # Calculate how many timesteps we collected this batch
+            # 计算这个批次我们收集了多少个时间步
             t_so_far += np.sum(batch_lens)
 
-            # Increment the number of iterations
+            # 迭代次数加一
             i_so_far += 1
 
             # Logging timesteps so far and iterations so far
             self.logger['t_so_far'] = t_so_far
             self.logger['i_so_far'] = i_so_far
 
-            # 计算第 k 次迭代的优势，算法的第 4 行
+            # 计算第 k 次迭代的优势
             V, _ = self.evaluate(batch_obs, batch_acts)
             # 算法第 5 行
             A_k = batch_rtgs - V.detach()
@@ -1347,7 +1347,9 @@ class PPO:
                 # 计算 V_phi 和 pi_theta(a_t | s_t)
                 V, curr_log_probs = self.evaluate(batch_obs, batch_acts)
 
-                # Calculate the ratio pi_theta(a_t | s_t) / pi_theta_k(a_t | s_t)
+                # 计算比值： pi_theta(a_t | s_t) / pi_theta_k(a_t | s_t)
+                # 也就是当前策略和旧策略的比值。
+                # 这里用了一个数学技巧。
                 # NOTE: we just subtract the logs, which is the same as
                 # dividing the values and then canceling the log with e^log.
                 # For why we use log probabilities instead of actual probabilities,
@@ -1364,6 +1366,7 @@ class PPO:
                 # NOTE: we take the negative min of the surrogate losses because we're trying to maximize
                 # the performance function, but Adam minimizes the loss. So minimizing the negative
                 # performance function maximizes it.
+                # 计算actor和critic的损失。
                 actor_loss = (-torch.min(surr1, surr2)).mean()
                 critic_loss = nn.MSELoss()(V, batch_rtgs)
 
@@ -1390,21 +1393,18 @@ class PPO:
 
     def rollout(self):
         """
-                Too many transformers references, I'm sorry. This is where we collect the batch of data
-                from simulation. Since this is an on-policy algorithm, we'll need to collect a fresh batch
-                of data each time we iterate the actor/critic networks.
+        这部分代码是我们从模拟环境中收集一批数据的地方。由于这是一个**on-policy**算法，每次迭代actor/critic网络时，我们都需要收集一批新的数据。
 
-                Parameters:
-                        None
+        Parameters: None
 
-                Return:
-                        batch_obs - the observations collected this batch. Shape: (number of timesteps, dimension of observation)
-                        batch_acts - the actions collected this batch. Shape: (number of timesteps, dimension of action)
-                        batch_log_probs - the log probabilities of each action taken this batch. Shape: (number of timesteps)
-                        batch_rtgs - the Rewards-To-Go of each timestep in this batch. Shape: (number of timesteps)
-                        batch_lens - the lengths of each episode this batch. Shape: (number of episodes)
+        Return:
+            batch_obs - 本批次收集的观测值。形状: (number of timesteps, dimension of observation)
+            batch_acts - 本批次收集的动作。形状： (number of timesteps, dimension of action)
+            batch_log_probs - 本批次执行动作的对数概率。形状： (number of timesteps)
+            batch_rtgs - 批次每个时间步对应的“奖励到达”（Rewards-To-Go）。形状： (number of timesteps)
+            batch_lens - 本批次中每个episode的长度。形状： (number of episodes)
         """
-        # Batch data. For more details, check function header.
+        # 批次数据
         batch_obs = []
         batch_acts = []
         batch_log_probs = []
@@ -1412,11 +1412,11 @@ class PPO:
         batch_rtgs = []
         batch_lens = []
 
-        # Episodic data. Keeps track of rewards per episode, will get cleared
-        # upon each new episode
+        # 回合数据。跟踪每个回合的奖励
+        # 每次开始新的回合会被清空。
         ep_rews = []
 
-        t = 0  # Keeps track of how many timesteps we've run so far this batch
+        t = 0  # 跟踪到现在为止，在当前批次中运行了多少个时间步
 
         # Keep simulating until we've run more than or equal to specified timesteps per batch
         while t < self.timesteps_per_batch:
@@ -1462,10 +1462,10 @@ class PPO:
         batch_obs = torch.tensor(batch_obs, dtype=torch.float)
         batch_acts = torch.tensor(batch_acts, dtype=torch.float)
         batch_log_probs = torch.tensor(batch_log_probs, dtype=torch.float)
-        # ALG STEP 4
+        # 算法第 4 行
         batch_rtgs = self.compute_rtgs(batch_rews)
 
-        # Log the episodic returns and episodic lengths in this batch.
+        # 记录当前批次的回合的回报和回合的长度。
         self.logger['batch_rews'] = batch_rews
         self.logger['batch_lens'] = batch_lens
 
