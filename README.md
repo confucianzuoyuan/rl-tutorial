@@ -2076,3 +2076,166 @@ DeepSeek V3 主要通过两条路径运行。当你输入一个问题时，它�
 现在我们已经了解了 DeepSeek v3 的思维方式，它是 DeepSeek R1 实现的起点，我所说的起点是指它创建了 DeepSeek R1 零版本 ，这是在最终版本创建之前存在一些错误的初始版本。
 
 初始版本 (R1 Zero) 是使用强化学习创建的，其中 DeepSeek v3 充当强化学习代理（采取行动的参与者）。让我们先来直观地了解一下它的工作原理。
+
+![](./images/3.webp)
+
+强化学习智能体 (DeepSeek V3) 首先执行一个 Action ，这意味着它会针对给定的问题生成答案和一些推理，并将其放入其 Environment 中。在这种情况下， Environment 就是推理任务本身。
+
+执行操作后，环境会返回一个奖励 (Reward) 。这个奖励就像反馈一样，它告诉 DeepSeek V3 基础模型其操作的效果如何。正向奖励表示它做对了某件事，例如得到了正确的答案或推理得当。这个反馈信号随后会返回到 DeepSeek-V3-Base，帮助它学习并调整未来的操作方式，以获得更好的奖励。
+
+在接下来的部分中，我们将讨论这个带有奖励模型的 RL 设置以及他们使用的 RL 算法，并尝试使用我们的文本输入来解决它。
+
+## 4. GRPO 算法如何工作？
+
+训练 LLM 的计算成本极其高昂，而 RL 则增加了更多的复杂性。
+
+因此，虽然有很多可用的强化学习算法，但正如你所知，传统的强化学习使用一种叫做 “评论家” 的东西来辅助主要的决策部分（“演员（actor）”，例如 DeepSeek V3）。这个评论家通常和参与者本身一样庞大和复杂，这基本上会使计算成本翻倍。
+
+然而，GRPO 的做法有所不同，因为它会根据一组动作的结果，直接计算出一个基线，即良好动作的参考点。因此，GRPO 根本不需要单独的评论家模型。这节省了大量计算量，提高了效率。
+
+![](./images/4.webp)
+
+它首先向一个名为 “旧策略” 的模型提出一个问题或提示。GRPO 不会只生成一个答案，而是指示旧策略针对同一问题生成一组不同的答案。然后，对每个答案进行评估，并给出一个奖励分数，以反映其优劣程度或可取性。
+
+GRPO 通过将每个答案与同一组内其他答案的平均质量进行比较，计算出其 “优势” 。高于平均水平的答案获得正优势，低于平均水平的答案获得负优势。至关重要的是，这一计算无需单独的评价模型。
+
+这些优势分数随后被用于更新旧策略，使其在未来更有可能产生优于平均水平的答案。更新后的模型将成为新的 “旧策略” ，并不断重复该过程，不断迭代改进模型。
+
+## 5. GRPO 的目标函数
+
+显然，在这个 GRPO 背后，有复杂的数学💀总之，我们可以称之为 GRPO 背后的目标函数。
+
+![](./images/5.webp)
+
+GRPO 的目标函数有两个目标：一是给出良好的输出 （高奖励），同时确保训练过程稳定且不失控。原始函数有点吓人，但我们会在不影响其实际含义的情况下，将其改写成更简单的形式。
+
+![](./images/6.webp)
+
+让我们逐一分解。首先， 平均结果 `[…]` 或 `1/n[…]` 指的是评估在许多不同情况下平均发生的情况。我们提出一个包含各种问题的模型。对于每个问题，模型会生成一组答案。通过分析许多问题及其各自的答案组，我们可以计算出一个平均结果。
+
+![](./images/7.webp)
+
+在此过程中，问题会被输入到一个旧模型中，该模型会产生多个答案（例如，答案 1、答案 2……答案 G）。这些答案组成一个组，通过对不同问题的评估，我们得出平均结果。
+
+`SumOf[..]` 或 `∑[…]` 是指对一组答案（例如，答案 1、答案 2、……、答案 G）中的每个答案进行计算，然后将所有这些计算的结果相加。
+
+接下来是奖励部分。 这部分用于奖励给出良好答案的模型。它内部有点复杂，我们来看一下：
+
+![](./images/8.webp)
+
+ChangeRatio 告诉我们，新模型下，给出这个答案的概率是增加了还是减少了。具体来说，它关注的是：
+
+- 新模型的答案机会 ：新模型给出特定答案的可能性有多大。
+- 使用旧模型回答的可能性 ：旧模型给出相同答案的可能性有多大。
+
+接下来， 优势分数表明一个答案与同一组中的其他答案相比，优劣程度如何。其计算方法如下：
+
+![](./images/9.webp)
+
+- 答案分数 ：给予特定答案的奖励。
+- 群组平均分数 ：群组内所有答案的平均奖励分数。
+- 组内分数分布 ：组中答案分数的差异有多大。
+
+优势分数告诉我们一个答案是否比小组内的平均水平更好，以及好多少。
+
+![](./images/10.webp)
+
+LimitedChangeRatio 是 ChangeRatio 的修改版本。 它确保 ChangeRatio 不会波动过大，从而保持模型的学习稳定性。该限制由一个名为 Epsilon 的小值决定，以确保变化不会过于剧烈。
+
+最后， SmallerOf[ … ] 函数在两个选项中选取较小的值：
+
+- ChangeRatio × Advantage ：答案可能性的变化乘以其优势得分。
+- LimitedChangeRatio × Advantage ：相同，但变化率有限。
+
+通过选择较小的值，模型可以确保学习过程保持平稳，并且不会对性能的大幅变化反应过度。最终的结果是 “良好答案奖励” ，鼓励模型改进，但不会过度补偿。
+
+最后，我们减去 StayStablePart 。这是为了让新模型与旧模型之间不会出现太大的变化。这并不复杂，但让我们放大来看：
+
+![](./images/11.webp)
+
+DifferenceFromReferenceModel 衡量的是新模型与参考模型 （通常是旧模型 ）的差异程度。本质上，它有助于评估新模型与旧模型相比所做的更改。
+
+Beta 值控制着模型与参考模型的接近程度。Beta 值越大，模型将优先接近旧模型的行为和输出，从而防止出现过大的偏差。让我们直观地看一下：
+
+![](./images/12.webp)
+
+简而言之， StayStablePart 确保模型逐步学习并且不会出现疯狂的跳跃。
+
+## 6. DeepSeek R1 Zero 的奖励建模
+
+现在我们已经了解了主要的理论概念，让我们使用文本输入来了解创建 R1 Zero 的奖励模型是如何运作的。
+
+记住，在 R1 Zero 中，他们把事情做得简单直接。他们没有使用复杂的神经网络来判断答案（就像在后期阶段那样），而是使用了基于规则的奖励系统 。
+
+对于我们的数学问题： “2 + 3 * 4 等于多少？”
+
+### Rule-Based Check  基于规则的检查
+
+系统知道正确答案是 14。 它将查看 DeepSeek V3（我们的 RL 智能体）生成的输出，并专门检查 `<answer>` 标签内部。
+
+![](./images/13.webp)
+
+如果 `<answer>` 标签包含“14”（或数值相同的数字），它会获得正奖励，比如说 +1 。如果答案错误，它会获得 0 奖励，甚至可能是负奖励（不过本文现阶段为了简单起见主要关注 0 奖励）。
+
+### Format Rewards  格式奖励
+
+但是 DeepSeek R1 Zero 还需要学习正确地构建其推理，并且为了能够使用 `<think>` 和 `<answer>` 标签，正确使用格式的奖励较小。
+
+![](./images/14.webp)
+
+检查模型输出是否正确包含 `<think>…</think>` 内的推理过程以及 `<answer>…</answer>` 内的最终答案。
+
+> [!NOTE]
+> DeepSeek R1 论文明确提到避免使用 DeepSeek-R1-Zero 的神经奖励模型，以防止奖励黑客攻击并降低初始探索阶段的复杂性
+
+### 奖励训练模板
+
+为了使奖励模型有效，研究人员设计了一个特定的训练模板。该模板充当蓝图，指导 DeepSeek-V3-Base 在强化学习过程中如何构建其响应。
+
+让我们看一下原始模板并将其逐一分解：
+
+```
+A conversation between User and Assistant. The user asks a question, and 
+the Assistant solves it. The assistant first thinks about the reasoning 
+process in the mind and then provides the user with the answer. The reasoning 
+process and answer are enclosed within <think> </think> and <answer> </answer>
+tags respectively, i.e., <think> reasoning process here </think>
+<answer> answer here </answer>. User: {prompt}. Assistant:
+```
+
+我们在 `{prompt}` 中输入数学问题，例如 2 + 3 * 4 等于多少？ 最重要的是 `<think>` 和 `<answer>` 标签。这种结构化的输出对于研究人员日后深入了解模型的推理步骤至关重要。
+
+在训练 DeepSeek-R1-Zero 时，我们使用此模板为其提供提示。对于我们的示例问题，输入如下：
+
+```
+A conversation between User and Assistant. The user asks a question, and 
+the Assistant solves it. The assistant first thinks about the reasoning 
+process in the mind and then provides the user with the answer. The reasoning 
+process and answer are enclosed within <think> </think> and <answer> </answer>
+tags respectively, i.e., <think> reasoning process here </think>
+<answer> answer here </answer>. User: What is 2 + 3 * 4?. Assistant:
+```
+
+并且我们期望模型生成符合模板的输出，例如：
+
+```
+<think>
+Order of operations:
+multiply before add. 3 * 4 = 12. 2 + 12 = 14
+</think>
+<answer>
+14
+</answer>
+```
+
+> [!NOTE]
+> 有趣的是，DeepSeek 团队有意让这个模板保持简单并专注于结构，而不是告诉模型如何推理。
+
+## 7. DeepSeek R1 Zero 的 RL 训练过程
+
+虽然论文没有指定 RL 预训练的确切初始数据集，但我们假设它应该以推理为中心。
+
+他们做的第一步是使用旧策略（ 强化学习更新之前的 DeepSeek-V3-Base 模型）生成多个可能的输出。在一次训练迭代中，我们假设 GRPO 采样一组 G = 4 个输出。
+
+例如，模型针对我们的文本输入生成以下四个输出 ：2 + 3 * 4 等于多少？
+
