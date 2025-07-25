@@ -2588,3 +2588,715 @@ Total Reward = (1 * Accuracy Reward) + (0.2 * Language Consistency Reward)
 - 提炼模型：学生模型现在被提炼为更小的版本，但保留了 DeepSeek-R1 的大部分推理能力。
 - 结果：我们获得了更小、更快、具有良好推理能力的模型，可供部署。
 
+## 2. 动手实现GRPO
+
+### 1. 安装依赖
+
+```requirements
+torch
+torchvision
+torchaudio
+transformers
+datasets
+accelerate
+peft
+trl
+wandb
+vllm
+latex2sympy2_extended
+math_verify
+```
+
+现在，让我们导入所需的库并为我们的训练设置环境。
+
+```py
+# 导入必要的库
+import logging
+import os
+import sys
+import re
+import math
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+# 导入PyTorch和Hugging Face Transformers库
+import torch
+import transformers
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    HfArgumentParser,
+    TrainingArguments,
+    set_seed,
+    TrainerCallback,
+    TrainerControl,
+    TrainerState,
+)
+from transformers.trainer_utils import get_last_checkpoint
+
+# 导入数据集相关库
+import datasets
+from datasets import load_dataset
+
+# 从 TRL (Transformers Reinforcement Learning) 导入相关库
+from trl import (
+    AutoModelForCausalLMWithValueHead, 
+    PPOConfig, 
+    PPOTrainer, 
+    GRPOTrainer, 
+    GRPOConfig, 
+    SFTTrainer
+)
+
+# 导入数学相关的库
+from latex2sympy2_extended import NormalizationConfig
+from math_verify import LatexExtractionConfig, parse, verify
+```
+
+### 2. 训练数据集
+
+虽然论文没有说明 RL 预训练所使用的初始数据集，但我们假设它应该是推理方面的数据集。
+
+因此为了尽可能接近原始实现，我们将使用这两个开源的推理数据集（来自Hugging Face）：
+
+ 1. [NuminaMath-TIR](https://huggingface.co/datasets/AI-MO/NuminaMath-TIR) (训练 R1 Zero 时使用)
+
+ 2. [Bespoke-Stratos-17k](https://huggingface.co/datasets/bespokelabs/Bespoke-Stratos-17k) (训练 R1 时使用)
+
+AI-MO/NuminaMath-TIR 包含 70K 个数学问题，其中的messages列显示了解答背后的 COT（思维链）推理。
+
+| Field    | Description |  
+|----------|------------|  
+| problem  | The math problem |  
+| solution | Step-by-step solution |  
+| messages    | Chat to solve the problem |
+
+看一下数据集的样本：
+
+```py
+# 从 DigitalLearningGmbH 加载 "AI-MO/NuminaMath-TIR" 数据集
+MATH_le = load_dataset("AI-MO/NuminaMath-TIR", "default")  
+
+# 获取训练数据的第一条数据（样本）
+MATH_le['train'][0]
+
+
+#### OUTPUT ####
+{
+'problem': 'What is the degree of the polynomial 4 +5x^3 ... ',
+'solution': 'This polynomial is not written in ...',
+'messages': [{'from': 'user', 'value': 'The problem ...'}]
+}
+#### OUTPUT ####
+```
+
+而 Bespoke-Stratos 数据集包含 17K 个专注于数学和代码的问题。
+
+| Field        | Description |  
+|-------------|------------|  
+| system      | Guidelines for math and code problems |  
+| conversation | Chat to solve the problem |
+
+它的数据样本如下所示：
+
+```python
+# Load the "Bespoke-Stratos-17k" dataset from bespokelabs
+bespoke_rl = load_dataset("bespokelabs/Bespoke-Stratos-17k", "default") 
+
+# Access the first sample in the training set
+bespoke_rl['train'][0]
+
+
+#### OUTPUT ####
+{
+'system': 'Your role as an assistant involves ... ',
+'conversations': [{'from': 'user', 'value': 'Return your ...'}]
+}
+ #### OUTPUT ####
+```
+
+你不一定要选择这两个数据集，可以选择任何一个面向推理的数据集（**包含问题及问题的分步解答**）。
+
+### 3. 选择基础模型
+
+由于 DeepSeek 团队选择了 DeepSeek-V3 作为基础模型来创建 R1 Zero 和 R1，但它的大小相当庞大（**685 GB💀**），显然超出了我们的承受范围。
+
+为简单起见，我们将使用小得多的基础模型 [Qwen/Qwen2.5–0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct)（大小为 0.9 GB）。如果有更大的 GPU RAM，甚至可以加载未量化的 LLM，那么可以选择更大的模型，例如 [Qwen/Qwen2.5–7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct) 。
+
+让我们看一下我们用的基础模型的一些规格：
+
+```python
+MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+OUTPUT_DIR = "data/Qwen-GRPO-training" # 用来保存我们训练的模型
+
+# 创建文件夹
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# 初始化tokenizer分词器和聊天模板
+tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_NAME,
+    trust_remote_code=True,
+    padding_side="right"
+)
+
+# 设置pad token
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+print(f"Vocabulary size: {len(tokenizer)}")
+print(f"Model max length: {tokenizer.model_max_length}")
+print(f"Pad token: {tokenizer.pad_token}")
+print(f"EOS token: {tokenizer.eos_token}")
+
+
+#### OUTPUT ####
+Vocabulary size: 151665
+Model max length: 131072
+Pad token: <|endoftext|>
+EOS token: <|im_end|>
+#### OUTPUT ####
+```
+
+这些是有关模型的一些基本信息，请查看我们的基础模型的参数总数。
+
+```python
+# 初始化基础模型
+model = AutoModelForCausalLM.from_pretrained(
+  MODEL_NAME,
+  trust_remote_code=True,
+  torch_dtype=torch.bfloat16
+)
+
+print(f"Model parameters: {model.num_parameters():,}")
+
+
+#### OUTPUT ####
+Model parameters: 494,032,768
+#### OUTPUT ####
+```
+
+接近 0.5B 个参数，让我们从中打印一个简单的响应，然后我们将继续下一步。
+
+```python
+# 检查 CUDA 是否可用
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+# 将模型转移到device
+model.to(device)
+
+# 测试基础模型的输出
+def test_model_inference(user_input: str):
+    """使用加载的模型和分词器测试基础模型的输出。"""
+    messages = [
+        {"role": "system", "content": "You are Qwen, a helpful assistant."},
+        {"role": "user", "content": user_input}
+    ]
+
+    # 使用聊天模板
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+
+    # 分词然后生成输出
+    inputs = tokenizer(text, return_tensors="pt").to(device)
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=100,
+        do_sample=True,
+        temperature=0.7
+    )
+
+    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return response
+
+# 测试模型
+test_input = "how are you?"
+response = test_model_inference(test_input)
+print(f"Test Input: {test_input}")
+print(f"Model Response: {response}")
+
+
+#### OUTPUT ####
+"Test Input: how are you?
+Model Response: As an AI language model I dont have feelings ..."
+#### OUTPUT ####
+```
+
+所以，这个小的大模型的输出非常可靠，并且肯定适合我们去训练和 DeepSeek 相似的模型。
+
+### 4. 强化学习中的策略模型
+
+现在我们已经选择了基础模型，接下来我们需要了解如何用强化学习训练大语言模型。
+
+对于 DeepSeek R1，他们的起点是（DeepSeek V3）基础模型，而在我们的案例中，我们从 `Qwen2.5–0.5B-Instruct` 开始。我所说的起点是指 **它已经创建了 DeepSeek R1 Zero版本** ，这是在创建最终版本之前包含一些错误的初始版本。
+
+初始版本 (R1 Zero) 是使用强化学习训练出来的，其中 (DeepSeek v3/Qwen2.5–0.5B) 充当强化学习的智能体（采取行动的演员）。让我们首先直观地了解一下它的工作原理。
+
+强化学习智能体 (DeepSeek V3/Qwen2–0.5B) 首先采取一个 **动作** ，这意味着它会针对给定的问题生成答案和一些推理，并将其放入其 **环境** 中。在这种情况下，环境就是推理任务本身。
+
+采取动作后，环境会给出奖励。这个奖励就像反馈，它告诉我们的基础模型（DeepSeek V3/Qwen2–0.5B）它的动作有多好。正奖励意味着它做对了某件事，可能得到了正确的答案或推理得很好。这个反馈信号随后会返回到我们的基础模型，帮助它学习和调整未来如何采取动作以获得更好的奖励。
+
+### 5. GRPO
+
+让我们了解一下 DeepSeek 的 GRPO 实现如何与我们的基础模型（Qwen2-0.5B）协同工作。
+
+首先， **问题输入（A）** 被输入到 **Qwen 模型（B）** 中，Qwen 尝试通过 **生成补全（C）** 来产生答案。最终结果称为 **补全完成的输出（D）** ，其中包括 `<think>` 标签中的推理步骤和 `<answer>` 标签中的最终解决方案。
+
+接下来， **问题输入 (A)** 和 **真实答案 (E)** 被输入到 **Reward函数 (F)** 中，充当智能评分器。这些函数将 Qwen 的 **补全完成的输出（D）** 与正确答案进行比较，并评估不同方面，例如：
+
+1. **准确性** (答案正确吗？)
+2. **格式** (`<think>` 和 `<answer>` 标签是否正确使用了？)
+3. **推理步骤** (逻辑清楚吗?)
+4. **余弦缩放(Cosine Scaling)** (响应是否简洁？)
+5. **重复性惩罚(Repetition Penalty)** (是否存在不必要的重复？).
+
+这些评估会产生 **Reward分数 (G)** ，然后传递给 **GRPO训练器(H)** 。训练器使用梯度来调整 **Qwen模型(B)** ，微调其生成答案的方式。这个过程被称为 **Gradient Reward Policy Optimization**，因为它使用 **梯度** 、**奖励** 和 **策略** 调整来优化 Qwen 响应，以最大限度地提高性能。
+
+最后，更新后的 **Qwen模型(B)** 再次在新问题上进行测试，通过反复循环不断完善自身。随着每次迭代，Qwen 都会成为更好的问题解决者。
+
+在下一节中，我们将开始预处理 GRPO 训练所使用的训练数据集。
+
+### 6. 提示词模板
+
+我们使用与 DeepSeek 用于 GRPO 算法的相同思维提示模板来构建 R1 Zero，因此让我们定义：
+
+```python
+# DeepSeek用的系统提示词
+SYSTEM_PROMPT = (
+  f"""A conversation between User and Assistant. The user asks a question, 
+      and the Assistant solves it. The assistant
+      first thinks about the reasoning process in the mind and 
+      then provides the user with the answer. The reasoning
+      process and answer are enclosed within <think> </think> 
+      and <answer> </answer> tags, respectively, i.e., 
+      <think> reasoning process here </think><answer> answer here </answer>
+   """
+)
+```
+
+系统提示词告诉基础模型（Qwen2-0.5B）它的角色是作为一个有用的助手，在回答之前逐步进行推理。
+
+`<think>` 和 `<answer>` 标签用于构建模型响应，将其内部推理与最终答案分开，以便更好地评估和奖励。
+
+### 7. 预处理训练数据
+
+现在我们已经准备好系统提示词，我们需要根据模板转换训练数据。
+
+![](./images/14.png)
+
+我们需要创建 `make_conversation` 函数来为我们处理对话。
+
+```python
+# 将训练数据结构化
+def make_conversation(example):
+  """Convert dataset examples into conversation format."""
+  return {
+      "prompt": [
+          {"role": "system", "content": SYSTEM_PROMPT},
+          {"role": "user", "content": example["problem"]},
+      ],
+  }
+```
+
+它将从我们的训练数据集中获取每个问题列的值，并返回一个包含系统提示和每行附加问题的字典。让我们创建这个函数来准备我们的数据集。
+
+```python
+# 加载和准备数据集
+def load_math_dataset():
+    """Load and prepare the mathematics dataset."""
+    dataset = load_dataset(
+        "AI-MO/NuminaMath-TIR",
+        name="default",
+        split=['train', 'test']
+    )
+    
+    # 转换成字典
+    dataset = {
+        'train': dataset[0],
+        'test': dataset[1]
+    }
+    
+    # 转换格式
+    for split in dataset:
+        dataset[split] = dataset[split].map(make_conversation)
+
+        # 删除`messages`这一列
+        if "messages" in dataset[split].column_names:
+            dataset[split] = dataset[split].remove_columns("messages")
+    
+    return dataset
+```
+
+我们已经准备好一切，让我们将训练数据转换为所需的格式并打印训练和测试规模。
+
+```python
+dataset = load_math_dataset()
+
+print(f"训练集大小: {len(dataset['train'])}")
+print(f"测试集大小: {len(dataset['test'])}")
+
+
+
+#### OUTPUT ####
+Train set size: 72441
+Test set size: 99
+#### OUTPUT ####
+```
+
+现在我们已经分割了训练数据集，在进入下一步之前，我们需要验证数据集（**检查用户/助手对话是否存在**）。
+
+```python
+def validate_dataset(dataset):
+    """针对数据集做最基本的检查."""
+    
+    # 定义数据集需要的字段
+    required_fields = ["problem", "prompt"]
+
+    for split in ['train', 'test']:
+        print(f"\nValidating {split} split:")
+
+        # 从数据集抽取列的名字
+        fields = dataset[split].column_names
+
+        # 检查字段是否丢失
+        missing = [field for field in required_fields if field not in fields]
+        if missing:
+            print(f"Warning: Missing fields: {missing}")
+        else:
+            print("✓ All required fields present")
+
+        # 抽取第一个样本
+        sample = dataset[split][0]
+
+        # 抽取提示词 'prompt' 字段
+        messages = sample['prompt']
+
+        # 校验提示词的格式:
+        # - 必须包含至少两条信息
+        # - 第一条信息必须来自 'system' 角色
+        # - 第二条信息必须来自 'user' 角色
+        if (len(messages) >= 2 and
+            messages[0]['role'] == 'system' and
+            messages[1]['role'] == 'user'):
+            print("✓ Prompt format is correct")
+        else:
+            print("Warning: Incorrect prompt format")
+
+# 验证数据集
+validate_dataset(dataset)
+```
+
+输出如下：
+
+```
+Validating train split:
+
+✓ All required fields present
+✓ Prompt format is correct
+
+Validating test split:
+
+✓ All required fields present
+✓ Prompt format is correct
+```
+
+我们的训练数据集已成功验证🙌，这意味着我们已成功转换数据集以进行训练。
+
+### 8. 奖励函数
+
+我们已经在 GRPO 部分看到，它通过五种不同的方式评估基础模型的答案：
+
+![](./images/15.png)
+
+1. **准确性** (答案正确吗？)
+2. **格式** (`<think>` 和 `<answer>` 标签是否正确使用了？)
+3. **推理步骤** (逻辑清楚吗?)
+4. **余弦缩放(Cosine Scaling)** (响应是否简洁？)
+5. **重复性惩罚(Repetition Penalty)** (是否存在不必要的重复？).
+
+这些函数都会计算每个响应的奖励，我们需要对它们进行编码。所以，让我们先这样做。
+
+#### 准确性奖励
+
+准确性奖励最容易理解，但需要稍微复杂的代码。在这个奖励模型中，我们想要检查从数学上讲我们的基础模型响应是否等同于真实答案。
+
+![](./images/16.png)
+
+如果模型答案在数学上是正确的，我们将分配 **1.0** 的奖励。如果不正确，则奖励为 **0.0** 。在无法解析基本事实解决方案的情况下，我们将分配 **0.5** 的中性奖励，以避免不公平的惩罚。
+
+现在，让我们实现该功能。
+
+```python
+def accuracy_reward(completions, solution, **kwargs):
+    """
+    奖励函数用于检查模型的回答是否在数学上等于标准答案。
+    函数使用 latex2sympy2 进行解析，并通过 math_verify 进行验证。
+    """
+    
+    # 抽取响应
+    contents = [completion[0]["content"] for completion in completions]
+    rewards = []
+    
+    for content, sol in zip(contents, solution):
+        # 对解答进行解析
+        gold_parsed = parse(sol, extraction_mode="first_match", 
+                            extraction_config=[LatexExtractionConfig()])
+        
+        if gold_parsed:  # 如果解析成功
+            # 使用宽松的归一化解析模型的答案
+            answer_parsed = parse(
+                content,
+                extraction_config=[
+                    LatexExtractionConfig(
+                        normalization_config=NormalizationConfig(
+                            nits=False,
+                            malformed_operators=False,
+                            basic_latex=True,
+                            equations=True,
+                            boxed="all",
+                            units=True,
+                        ),
+                        boxed_match_priority=0,
+                        try_extract_without_anchor=False,
+                    )
+                ],
+                extraction_mode="first_match",
+            )
+
+            # 如果答案正确，奖励 1.0 , 如果不正确，奖励 0.0 。
+            reward = float(verify(answer_parsed, gold_parsed))
+        else:
+            # 如果标准答案无法解析，则赋予中性奖励（0.5）
+            reward = 0.5
+            print("Warning: Failed to parse gold solution:", sol)
+
+        rewards.append(reward)
+    
+    return rewards
+```
+
+在此函数中，我们检查模型响应是否等同于正确答案。我们不比较原始文本，而是：
+
+1. 使用 **latex2sympy2** 将答案转换为结构化数学格式。
+2. 如果解析失败，则分配 **0.5** 的中性奖励。
+3. 提取模型输出并进行归一化以获得更好的鲁棒性。
+4. 使用 **math_verify** 检查解析的响应是否与解析的解法匹配。
+5. 如果正确则分配 **1** ，如果不正确则分配 **0** 。
+
+这确保了准确性评估不仅仅涉及文本相似性，还涉及 **真正的数学正确性** 。
+
+#### 格式奖励
+
+格式奖励就是确保我们的模型遵循指令并正确构建其输出。我们要求它将推理放在 `<think>` 标签中，将最终答案放在 `<answer>` 标签中，对吗？此奖励函数正是检查这一点！
+
+![](./images/17.png)
+
+如果模型正确使用了这些标签，我们会给它 **1** 的奖励。如果格式混乱，就会得到 **0** 。就这么简单！这鼓励模型关注我们想要的输出结构。
+
+让我们编程实现:
+
+```python
+# 实现格式奖励函数
+def format_reward(completions, **kwargs):
+  """
+  奖励函数会检查补全的回答是否有正确的格式:
+  <think>...</think> <answer>...</answer>.
+  """
+  # 定义正确格式的正则表达式
+  pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>$"
+
+  # 从每个回答中抽取内容
+  completion_contents = [completion[0]["content"] for completion in completions]
+
+  # 检查每个回答是否符合正则表达式
+  matches = [re.match(pattern, content, re.DOTALL | re.MULTILINE)
+             for content in completion_contents]
+
+  # 格式正确则奖励 1.0 ，不正确则奖励 0.0
+  return [1.0 if match else 0.0 for match in matches]
+```
+
+在这个函数里：
+
+- 我们使用正则表达式（regex）定义了一个模式。这个模式基本上表示“内容应该以 `<think>` 开头，里面可以有任意内容直到 `</think>`，然后是一些空格，接着是 `<answer>`，里面可以有任意内容直到 `</answer>`，并且内容就此结束”。
+- 我们从每个回答中获取实际的文本内容。
+- 然后我们使用 `re.match` 来查看每个内容是否完全匹配我们的模式。`re.DOTALL` 帮助正则表达式中的 . 匹配换行符，而 `re.MULTILINE` 使 `^` 和 `$` 匹配整个字符串的开始/结束，而不仅仅是行。
+- 最后，如果格式完全匹配，我们会给予奖励 **1** ，如果不匹配，则会给予奖励 **0** 。这是对格式正确性的严格开/关奖励。
+
+#### 推理步骤奖励
+
+推理步骤奖励有点聪明。我们想鼓励我们的模型展示它的 **“思考过程”** 。因此，我们将奖励它包括看起来像推理步骤的内容。
+
+![](./images/18.png)
+
+我们将寻找在逐步推理中通常出现的关键词和模式，例如：
+
+- Step 1, Step 2, 步骤 1、步骤 2 等等。
+- 编号列表，如 1、2
+- 未编号列表符号如 `-` 或 `*`
+- 过渡词，如“第一”、“第二”、“下一步”、“最后”
+
+它包含的内容越多，奖励就越好。这就像展示它的工作而给予积分一样！
+
+让我们编写这个推理鼓励函数：
+
+```python
+def reasoning_steps_reward(completions, **kwargs):
+    r"""
+    奖励函数用于鼓励清晰的逐步推理。
+    它会寻找类似“步骤1:”、编号列表符号、未编号列表符号以及过渡词等模式。
+    """
+    # 匹配推理步骤的正则表达式
+    pattern = r"(Step \d+:|^\d+\.|\n-|\n\*|First,|Second,|Next,|Finally,)"
+
+    # 抽取回答的内容
+    completion_contents = [completion[0]["content"] for completion in completions]
+
+    # 计算每个回答中的推理步骤数量
+    matches = [len(re.findall(pattern, content, re.MULTILINE))
+               for content in completion_contents]
+
+    # 奖励与推理步骤的数量成正比，最高为1.0。
+    # 这里使用了一个“魔法数字”3——鼓励至少完成3个步骤以获得满分奖励。
+    return [min(1.0, count / 3) for count in matches]
+```
+
+我们创建一个稍微复杂一点的正则表达式模式。它会查找我们上面列出的所有推理指标。
+
+我们使用 `re.findall` 在每个内容中查找符合我们模式的所有匹配项。`len(re.findall(…))` 为我们提供这些指标的数量。
+
+奖励的计算方式为 `min(1.0, count / 3)` 。这意味着
+
+- 如果它发现 3 个或更多推理指标（count >= 3），则奖励为 1.0（最大奖励）。
+- 如果发现较少的数量（例如，count = 1 或 2），它会获得部分奖励（如 1/3 或 2/3）。
+- 如果没有找到（count = 0），则奖励为 0.0。
+
+`/ 3` 是一个魔法数字。我们说“目标是完成大约 3 个推理步骤才能获得满分”，如果想鼓励更多或更少的步骤，可以调整这个数字。
+
+#### 余弦缩放奖励
+
+余弦缩放奖励稍微高级一些。它鼓励回答简洁的正确答案，对较长的错误答案则不那么苛刻。
+
+![](./images/19.png)
+
+- 对于正确答案：我们希望奖励更简短、更直接的解决方案，而不是冗长、漫无目的的解决方案。简短、正确的答案通常更好。
+- 对于错误答案：简短的错误答案可能比至少尝试推理的较长的错误答案更糟糕。因此，我们希望对简短的错误答案的惩罚比对较长的错误答案的惩罚更大。
+
+代码如下：
+
+```python
+# 实现余弦缩放奖励函数
+def get_cosine_scaled_reward(
+    min_value_wrong: float = -0.5,
+    max_value_wrong: float = -0.1,
+    min_value_correct: float = 0.8,
+    max_value_correct: float = 1.0,
+    max_len: int = 1000,
+):
+    """
+    返回一个余弦缩放的奖励函数。该函数根据完成长度对准确率奖励进行缩放。
+    较短的正确解答获得更高的奖励，较长的错误解答受到较小的惩罚。
+    """
+    def cosine_scaled_reward(completions, solution, accuracy_rewards, **kwargs):
+        """
+        余弦缩放的奖励函数，根据回答长度调整准确率奖励。
+        """
+        contents = [completion[0]["content"] for completion in completions]
+        rewards = []
+
+        for content, sol, acc_reward in zip(contents, solution, accuracy_rewards):
+            gen_len = len(content)  # 回答的长度
+            progress = gen_len / max_len # 距离最大长度有多远
+            cosine = math.cos(progress * math.pi) # 计算余弦
+
+            if acc_reward > 0.5: # 如果回答是正确答案
+                min_value = min_value_correct
+                max_value = max_value_correct
+            else: # 回答不正确
+                min_value = max_value_wrong  # 注意这个交换
+                max_value = min_value_wrong
+
+            # 余弦缩放公式
+            reward = min_value + 0.5 * (max_value - min_value) * (1.0 + cosine)
+            rewards.append(float(reward))
+        return rewards
+    return cosine_scaled_reward
+```
+
+`get_cosine_scaled_reward(...)` 生成一个用于训练的奖励函数，使用 `min_value_wrong/max_value_wrong`（错误答案的惩罚范围）和 `min_value_correct/max_value_correct`（正确答案的奖励范围）等参数定制缩放。`max_len` 设置缩放的最大长度。
+
+在 `cosine_scaled_reward(...)` 函数内部，我们根据生成内容（completions）、标准答案（solution）和准确率奖励（accuracy_rewards）计算奖励。
+
+它首先计算生成长度 `gen_len`，并将其归一化为进度 `progress = gen_len / max_len`，然后计算一个余弦值，该值从 1（短答案）开始，随着答案变长逐渐减小到 -1（长答案）。
+
+如果 `acc_reward > 0.5`，则使用正确答案的奖励范围；否则使用错误答案的奖励范围，但交换最小值和最大值，以减少对较长错误答案的惩罚。
+
+#### 重复惩罚奖励
+
+重复惩罚奖励旨在防止模型陷入循环、自我重复。
+
+我们希望模型生成新颖、多样的推理和答案，而不是一遍又一遍地复制粘贴相同的短语！
+
+![](./images/20.png)
+
+该奖励函数会惩罚模型多次使用相同的词序列（`n-gram`）。在我们的示例中使用的是长度为 `3` 的 `n-gram`（三元组），但你可以根据需要调整。
+
+如果模型重复内容较多，则会获得负奖励（惩罚）；如果内容更丰富、多样，避免重复，惩罚则较轻。
+
+下面我们来实现惩罚重复的代码：
+
+```python
+def get_repetition_penalty_reward(ngram_size: int = 3, max_penalty: float = -0.1):
+    """
+    返回一个重复惩罚奖励函数。对生成文本中重复出现的n-gram进行惩罚。
+    """
+    if max_penalty > 0:
+        raise ValueError(f"max_penalty {max_penalty} should not be positive")
+
+    def zipngram(text: str, ngram_size: int):
+        """从文本中生成 n-grams 的帮助函数."""
+        words = text.lower().split() # 转换成小写然后分割
+        return zip(*[words[i:] for i in range(ngram_size)]) # 创建 n-grams
+
+    def repetition_penalty_reward(completions, **kwargs) -> float:
+        """
+        Repetition penalty reward function.
+        """
+        contents = [completion[0]["content"] for completion in completions]
+        rewards = []
+        for completion in contents:
+            if completion == "": # 对空的回答不进行惩罚
+                rewards.append(0.0)
+                continue
+            if len(completion.split()) < ngram_size: # 对短回答不进行惩罚
+                rewards.append(0.0)
+                continue
+
+            ngrams = set() # 使用 set 保存去重后的 n-grams
+            total = 0
+            for ng in zipngram(completion, ngram_size): # 生成 n-grams
+                ngrams.add(ng) # 去重
+                total += 1 # 计数
+
+            # 计算缩放系数：重复越多，scaling 越大
+            scaling = 1 - len(ngrams) / total
+            reward = scaling * max_penalty # 计算惩罚
+            rewards.append(reward)
+        return rewards
+    return get_repetition_penalty_reward
+```
+
+我们的 `get_repetition_penalty_reward(...)` 创建了一个用于惩罚重复的奖励函数，带有参数如 ngram_size（默认值为3，表示三元组）和 max_penalty（一个负值，例如 -0.1）。
+
+一个辅助函数 `zipngram(text, ngram_size)` 通过将文本转换为小写、拆分成单词，并使用 `zip(*[words[i:] for i in range(ngram_size)])` 高效地提取 n-gram。
+
+在函数内部，`repetition_penalty_reward(...)` 计算每个生成内容的惩罚。如果内容为空或过短，则奖励为 0.0。
+
+惩罚的缩放计算为 `scaling = 1 - len(ngrams) / total`，其中 total 是 n-gram 的总数，len(ngrams) 是唯一 n-gram 的数量。重复越多，scaling 趋近于 1，惩罚越大。
+
+最终奖励为 scaling 乘以 max_penalty，意味着重复越少，惩罚越小；重复越多，负奖励越强。
+
+> 我们已经实现了全部五个奖励函数，接下来进入下一阶段，定义训练参数。
