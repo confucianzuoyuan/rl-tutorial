@@ -3300,3 +3300,317 @@ def get_repetition_penalty_reward(ngram_size: int = 3, max_penalty: float = -0.1
 最终奖励为 scaling 乘以 max_penalty，意味着重复越少，惩罚越小；重复越多，负奖励越强。
 
 > 我们已经实现了全部五个奖励函数，接下来进入下一阶段，定义训练参数。
+
+### 9. R1 Zero的训练配置
+
+现在我们需要编写一个配置，用来微调我们的 *奖励函数* 的具体工作方式。
+
+所以，让我们定义这个配置类：
+
+```python
+# 奖励函数的参数配置
+@dataclass
+class GRPOScriptArguments:
+    """
+    GRPO相关配置，特别是奖励函数的配置
+    """
+
+    reward_funcs: list[str] = field(
+        default_factory=lambda: ["accuracy", "format"],
+        metadata={
+            "help": "List of reward functions. Possible values: 'accuracy', 'format', 'reasoning_steps', 'cosine', 'repetition_penalty'"
+        },
+    )
+    cosine_min_value_wrong: float = field(
+        default=-0.5,
+        metadata={"help": "Minimum reward for cosine scaling for wrong answers"},
+    )
+    cosine_max_value_wrong: float = field(
+        default=-0.1,
+        metadata={"help": "Maximum reward for cosine scaling for wrong answers"},
+    )
+    cosine_min_value_correct: float = field(
+        default=0.8,
+        metadata={"help": "Minimum reward for cosine scaling for correct answers"},
+    )
+    cosine_max_value_correct: float = field(
+        default=1.0,
+        metadata={"help": "Maximum reward for cosine scaling for correct answers"},
+    )
+    cosine_max_len: int = field(
+        default=1000,
+        metadata={"help": "Maximum length for cosine scaling"},
+    )
+
+    repetition_n_grams: int = field(
+        default=3,
+        metadata={"help": "Number of n-grams for repetition penalty reward"},
+    )
+    repetition_max_penalty: float = field(
+        default=-0.1,
+        metadata={"help": "Maximum (negative) penalty for for repetition penalty reward"},
+    )
+```
+
+我们的 `@dataclass` 装饰器使创建用于存储数据的类变得简单。WhileGRPOScriptArguments 类用于保存奖励设置。
+
+`reward_funcs` 列表决定使用哪些奖励函数，初始包含 ["accuracy", "format"]，但你也可以添加更多，比如 "reasoning_steps"、"cosine"、"repetition_penalty"。
+
+部分设置控制 `cosine_scaled_reward` 和 `repetition_penalty_reward` 的工作方式，允许你调整奖励的分配方式。
+
+接下来，我们有来自 transformers 库的 TrainingArguments。这是控制训练过程几乎**所有**方面的**主要**配置对象。
+
+```python
+# Define TrainingArguments from transformers
+training_args = TrainingArguments(
+    output_dir=OUTPUT_DIR,          # Output directory for checkpoints and logs
+    overwrite_output_dir=True,
+    num_train_epochs=1,             # Total number of training epochs
+    per_device_train_batch_size=8,  # Batch size per device during training
+    per_device_eval_batch_size=16,   # Batch size for evaluation
+    gradient_accumulation_steps=2,  # Accumulate gradients to simulate larger batch size
+    learning_rate=5e-5,            # Initial learning rate for AdamW optimizer
+    warmup_ratio=0.1,              # Linear warmup over warmup_ratio fraction of training steps
+    weight_decay=0.01,             # Apply weight decay to all layers except bias and LayerNorm weights
+    logging_steps=10,              # Log every X updates steps
+    eval_strategy="steps",    # Evaluate every `eval_steps`
+    eval_steps=50,                 # Evaluation and logging steps
+    save_strategy="steps",         # Save checkpoint every `save_steps`
+    save_steps=50,                 # Save checkpoint every X updates steps
+    save_total_limit=2,            # Limit the total amount of checkpoints. Deletes the older checkpoints.
+    dataloader_num_workers=2,      # Number of subprocesses to use for data loading
+    seed=42,                       # Random seed for reproducibility
+    bf16=True,                     # Use mixed precision BFP16 training
+    push_to_hub=False,             # Whether to push the final model to Hugging Face Hub
+    gradient_checkpointing=True,   # Enable gradient checkpointing
+    report_to="none",              # Reporting to no one
+)
+```
+
+最后，我们需要一个 ModelConfig。这里放置的是与**模型本身**相关的设置，比如使用哪个预训练模型、使用什么数据类型（如 bfloat16）、是否信任远程代码等。
+
+让我们来定义我们的 ModelConfig：
+
+```python
+@dataclass
+class ModelConfig:
+    """
+    Configuration for the model.
+    """
+    model_name_or_path: str = field(
+        default=MODEL_NAME, metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
+    )
+    model_revision: Optional[str] = field(
+        default="main", metadata={"help": "The specific model version to use (can be a branch name, tag name or commit id)."}
+    )
+    torch_dtype: Optional[str] = field(
+        default="bfloat16", metadata={"help": "Override the default `torch_dtype` and load the model under this dtype."}
+    )
+    trust_remote_code: bool = field(
+        default=True, metadata={"help": "Trust remote code when loading model and tokenizer."}
+    )
+    attn_implementation: Optional[str] = field(
+        default="flash_attention_2", metadata={"help": "Attention implementation to use. 'flash_attention_2' or None"}
+    )
+```
+
+我们的**ModelConfig**类包含了关键设置，包括默认使用的模型名称或路径（model_name_or_path），默认为**Qwen 0.5B Instruct**。我们使用 torch_dtype="bfloat16" 来提高效率，并设置 trust_remote_code=True 以安全地加载远程代码。此外，启用了 attn_implementation="flash_attention_2"，如果支持的话，可以加快训练速度。
+
+现在我们需要实际**创建**这些配置类的实例，以便使用它们：
+
+```python
+# Instantiate configuration objects
+script_args = GRPOScriptArguments()
+model_args = ModelConfig()
+```
+
+接下来，我们需要获取奖励函数列表以及训练过程中要使用的“回调函数”。
+
+回调函数就像小帮手，可以在训练的不同阶段执行一些操作（比如记录进度、保存模型等）。目前，我们只使用一个简单的日志回调。
+
+将我们的奖励函数集中管理。
+
+```python
+# Utility function to get reward functions based on script arguments
+def get_reward_functions(script_args):
+    """
+    Returns a list of reward functions based on the script arguments.
+    """
+    reward_funcs_list = []
+    reward_funcs_registry = {
+        "accuracy": accuracy_reward,  # Assuming accuracy_reward is defined in previous steps
+        "format": format_reward,      # Assuming format_reward is defined in previous steps
+        "reasoning_steps": reasoning_steps_reward, # Assuming reasoning_steps_reward is defined
+        "cosine": get_cosine_scaled_reward( # Assuming get_cosine_scaled_reward is defined
+            min_value_wrong=script_args.cosine_min_value_wrong,
+            max_value_wrong=script_args.cosine_max_value_wrong,
+            min_value_correct=script_args.cosine_min_value_correct,
+            max_value_correct=script_args.cosine_max_value_correct,
+            max_len=script_args.cosine_max_len,
+        ),
+        "repetition_penalty": get_repetition_penalty_reward( # Assuming get_repetition_penalty_reward is defined
+            ngram_size=script_args.repetition_n_grams,
+            max_penalty=script_args.repetition_max_penalty,
+        ),
+    }
+
+    for func_name in script_args.reward_funcs:
+        if func_name not in reward_funcs_registry:
+            raise ValueError(f"Reward function '{func_name}' not found in registry.")
+        reward_funcs_list.append(reward_funcs_registry[func_name])
+
+    return reward_funcs_list
+```
+
+我们的回调函数将用于跟踪损失和其他重要信息。
+
+```python
+logger = logging.getLogger(__name__)
+
+class LoggingCallback(TrainerCallback):
+    """
+    A simple callback for logging training information at specific steps.
+    """
+    def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        if state.global_step % args.logging_steps == 0:
+            logger.info(f"Step {state.global_step}: Loss = {state.log_history[-1].get('loss', None)}, Learning Rate = {state.log_history[-1].get('learning_rate', None)}")
+
+def get_callbacks(training_args, model_args, script_args):
+    """
+    Returns a list of callbacks to be used during training.
+    For now, it includes only the LoggingCallback. You can extend this to add more callbacks.
+    """
+    callbacks = [LoggingCallback()] # Instantiate our LoggingCallback
+    return callbacks
+```
+
+最后，初始化这些函数。
+
+```python
+# Get reward functions and callbacks
+reward_functions = get_reward_functions(script_args)
+callbacks = get_callbacks(training_args, model_args, script_args)
+```
+
+### 10. GRPO训练循环
+
+这就是实际驱动我们 GRPO 训练的引擎。我们需要初始化它，传入所有准备好的部分：模型、奖励函数、训练参数、数据集和回调函数！
+
+让我们来初始化 GRPOTrainer：
+
+```python
+# Create GRPOConfig from TrainingArguments
+grpo_config = GRPOConfig(
+    **training_args.to_dict(), # Convert TrainingArguments to dictionary and unpack
+    **{ 
+       # REMOVED model_init_kwargs here 
+       # We are passing the instantiated 'model' object, so GRPOTrainer doesn't need model_init_kwargs
+    }
+)
+
+grpo_trainer = GRPOTrainer(
+    model=model,                      # Our initialized Qwen model
+    reward_funcs=reward_functions,    # List of reward functions from previous step
+    args=grpo_config,                # GRPOConfig (created from TrainingArguments)
+    train_dataset=dataset['train'],   # Training dataset
+    eval_dataset=dataset['test'],    # Evaluation dataset
+    callbacks=callbacks              # List of callbacks
+)
+```
+
+我们现在可以开始**训练循环**了！这只需简单地调用 grpo_trainer 的 train() 方法即可。
+
+```python
+# Start the GRPO Training Loop
+train_result = grpo_trainer.train()
+```
+
+然后训练开始了！
+
+```
+...
+INFO:__main__:Step 10: Loss = ..., Learning Rate = ...
+INFO:__main__:Step 20: Loss = ..., Learning Rate = ...
+...
+```
+
+训练会花费一些时间，但我们设置了 **num_train_epochs = 1**，并且使用的是一个小模型，所以这个示例不应该花费太长时间。
+
+但在实际的 GRPO DeepSeek R1 Zero 训练中，你可能需要训练更多的轮次和步骤。
+
+### 11. 保存模型
+
+一旦训练完成，我们可以保存训练好的模型，以用于推理。
+
+```python
+# Define the path to your trained model (same as OUTPUT_DIR)
+TRAINED_MODEL_PATH = "data/Qwen-GRPO-training"
+
+# Save the tokenizer
+tokenizer.save_pretrained(TRAINED_MODEL_PATH)
+
+# Save the trained model
+grpo_trainer.save_model(TRAINED_MODEL_PATH)
+
+print(f"GRPO Trained model saved to {TRAINED_MODEL_PATH}")
+```
+
+然后我们可以简单地使用以下命令加载训练好的模型：
+
+```python
+# Load the tokenizer - make sure to use trust_remote_code=True if needed
+tokenizer = AutoTokenizer.from_pretrained(
+    TRAINED_MODEL_PATH,
+    trust_remote_code=True, # If your model config requires it
+    padding_side="right" # Ensure consistent padding side
+)
+
+# Set pad token if it wasn't saved or loaded correctly
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+# Load the trained model itself
+trained_model = AutoModelForCausalLM.from_pretrained(
+    TRAINED_MODEL_PATH,
+    trust_remote_code=True, # If your model architecture requires it
+    torch_dtype=torch.bfloat16 # Keep the same dtype as training for consistency
+)
+
+# Move the loaded model to your device (GPU if available)
+trained_model.to(device) # 'device' is still our CUDA device from before
+```
+
+为了用它进行推理：
+
+```python
+# Testing Inference with the Trained Model
+def test_trained_model_inference(user_input: str):
+    """Test inference with the loaded trained model and tokenizer."""
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT}, # Re-use our system prompt
+        {"role": "user", "content": user_input}
+    ]
+
+    # Apply chat template using our tokenizer
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+
+    # Tokenize the input text
+    inputs = tokenizer(text, return_tensors="pt").to(device)
+
+    # Generate output using our *trained_model*
+    outputs = trained_model.generate(
+        **inputs,
+        max_new_tokens=200, # Maybe generate a bit longer now
+        do_sample=True,
+        temperature=0.7
+    )
+
+    # Decode the generated tokens back to text
+    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return response
+```
+

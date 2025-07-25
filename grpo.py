@@ -149,6 +149,8 @@ def make_conversation(example):
     }
 
 # 加载和准备数据集
+
+
 def load_math_dataset():
     """Load and prepare the mathematics dataset."""
     dataset = load_dataset(
@@ -156,13 +158,13 @@ def load_math_dataset():
         name="default",
         split=['train', 'test']
     )
-    
+
     # 转换成字典
     dataset = {
         'train': dataset[0],
         'test': dataset[1]
     }
-    
+
     # 转换格式
     for split in dataset:
         dataset[split] = dataset[split].map(make_conversation)
@@ -170,8 +172,9 @@ def load_math_dataset():
         # 删除`messages`这一列
         if "messages" in dataset[split].column_names:
             dataset[split] = dataset[split].remove_columns("messages")
-    
+
     return dataset
+
 
 dataset = load_math_dataset()
 
@@ -181,7 +184,7 @@ print(f"测试集大小: {len(dataset['test'])}")
 
 def validate_dataset(dataset):
     """针对数据集做最基本的检查."""
-    
+
     # 定义数据集需要的字段
     required_fields = ["problem", "prompt"]
 
@@ -210,29 +213,31 @@ def validate_dataset(dataset):
         # - 第二条信息必须来自 'user' 角色
         if (len(messages) >= 2 and
             messages[0]['role'] == 'system' and
-            messages[1]['role'] == 'user'):
+                messages[1]['role'] == 'user'):
             print("✓ Prompt format is correct")
         else:
             print("Warning: Incorrect prompt format")
 
+
 # 验证数据集
 validate_dataset(dataset)
+
 
 def accuracy_reward(completions, solution, **kwargs):
     """
     奖励函数用于检查模型的回答是否在数学上等于标准答案。
     函数使用 latex2sympy2 进行解析，并通过 math_verify 进行验证。
     """
-    
+
     # 抽取响应
     contents = [completion[0]["content"] for completion in completions]
     rewards = []
-    
+
     for content, sol in zip(contents, solution):
         # 对解答进行解析
-        gold_parsed = parse(sol, extraction_mode="first_match", 
+        gold_parsed = parse(sol, extraction_mode="first_match",
                             extraction_config=[LatexExtractionConfig()])
-        
+
         if gold_parsed:  # 如果解析成功
             # 使用宽松的归一化解析模型的答案
             answer_parsed = parse(
@@ -262,27 +267,31 @@ def accuracy_reward(completions, solution, **kwargs):
             print("Warning: Failed to parse gold solution:", sol)
 
         rewards.append(reward)
-    
+
     return rewards
 
 # 实现格式奖励函数
+
+
 def format_reward(completions, **kwargs):
-  """
-  奖励函数会检查补全的回答是否有正确的格式:
-  <think>...</think> <answer>...</answer>.
-  """
-  # 定义正确格式的正则表达式
-  pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>$"
+    """
+    奖励函数会检查补全的回答是否有正确的格式:
+    <think>...</think> <answer>...</answer>.
+    """
+    # 定义正确格式的正则表达式
+    pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>$"
 
-  # 从每个回答中抽取内容
-  completion_contents = [completion[0]["content"] for completion in completions]
+    # 从每个回答中抽取内容
+    completion_contents = [completion[0]["content"]
+                           for completion in completions]
 
-  # 检查每个回答是否符合正则表达式
-  matches = [re.match(pattern, content, re.DOTALL | re.MULTILINE)
-             for content in completion_contents]
+    # 检查每个回答是否符合正则表达式
+    matches = [re.match(pattern, content, re.DOTALL | re.MULTILINE)
+               for content in completion_contents]
 
-  # 格式正确则奖励 1.0 ，不正确则奖励 0.0
-  return [1.0 if match else 0.0 for match in matches]
+    # 格式正确则奖励 1.0 ，不正确则奖励 0.0
+    return [1.0 if match else 0.0 for match in matches]
+
 
 def reasoning_steps_reward(completions, **kwargs):
     r"""
@@ -293,7 +302,8 @@ def reasoning_steps_reward(completions, **kwargs):
     pattern = r"(Step \d+:|^\d+\.|\n-|\n\*|First,|Second,|Next,|Finally,)"
 
     # 抽取回答的内容
-    completion_contents = [completion[0]["content"] for completion in completions]
+    completion_contents = [completion[0]["content"]
+                           for completion in completions]
 
     # 计算每个回答中的推理步骤数量
     matches = [len(re.findall(pattern, content, re.MULTILINE))
@@ -304,6 +314,8 @@ def reasoning_steps_reward(completions, **kwargs):
     return [min(1.0, count / 3) for count in matches]
 
 # 实现余弦缩放奖励函数
+
+
 def get_cosine_scaled_reward(
     min_value_wrong: float = -0.5,
     max_value_wrong: float = -0.1,
@@ -324,13 +336,13 @@ def get_cosine_scaled_reward(
 
         for content, sol, acc_reward in zip(contents, solution, accuracy_rewards):
             gen_len = len(content)  # 回答的长度
-            progress = gen_len / max_len # 距离最大长度有多远
-            cosine = math.cos(progress * math.pi) # 计算余弦
+            progress = gen_len / max_len  # 距离最大长度有多远
+            cosine = math.cos(progress * math.pi)  # 计算余弦
 
-            if acc_reward > 0.5: # 如果回答是正确答案
+            if acc_reward > 0.5:  # 如果回答是正确答案
                 min_value = min_value_correct
                 max_value = max_value_correct
-            else: # 回答不正确
+            else:  # 回答不正确
                 min_value = max_value_wrong  # 注意这个交换
                 max_value = min_value_wrong
 
@@ -339,6 +351,7 @@ def get_cosine_scaled_reward(
             rewards.append(float(reward))
         return rewards
     return cosine_scaled_reward
+
 
 def get_repetition_penalty_reward(ngram_size: int = 3, max_penalty: float = -0.1):
     """
@@ -349,8 +362,8 @@ def get_repetition_penalty_reward(ngram_size: int = 3, max_penalty: float = -0.1
 
     def zipngram(text: str, ngram_size: int):
         """从文本中生成 n-grams 的帮助函数."""
-        words = text.lower().split() # 转换成小写然后分割
-        return zip(*[words[i:] for i in range(ngram_size)]) # 创建 n-grams
+        words = text.lower().split()  # 转换成小写然后分割
+        return zip(*[words[i:] for i in range(ngram_size)])  # 创建 n-grams
 
     def repetition_penalty_reward(completions, **kwargs) -> float:
         """
@@ -359,23 +372,272 @@ def get_repetition_penalty_reward(ngram_size: int = 3, max_penalty: float = -0.1
         contents = [completion[0]["content"] for completion in completions]
         rewards = []
         for completion in contents:
-            if completion == "": # 对空的回答不进行惩罚
+            if completion == "":  # 对空的回答不进行惩罚
                 rewards.append(0.0)
                 continue
-            if len(completion.split()) < ngram_size: # 对短回答不进行惩罚
+            if len(completion.split()) < ngram_size:  # 对短回答不进行惩罚
                 rewards.append(0.0)
                 continue
 
-            ngrams = set() # 使用 set 保存去重后的 n-grams
+            ngrams = set()  # 使用 set 保存去重后的 n-grams
             total = 0
-            for ng in zipngram(completion, ngram_size): # 生成 n-grams
-                ngrams.add(ng) # 去重
-                total += 1 # 计数
+            for ng in zipngram(completion, ngram_size):  # 生成 n-grams
+                ngrams.add(ng)  # 去重
+                total += 1  # 计数
 
             # 计算缩放系数：重复越多，scaling 越大
             scaling = 1 - len(ngrams) / total
-            reward = scaling * max_penalty # 计算惩罚
+            reward = scaling * max_penalty  # 计算惩罚
             rewards.append(reward)
         return rewards
     return get_repetition_penalty_reward
+
+# 奖励函数的参数配置
+
+
+@dataclass
+class GRPOScriptArguments:
+    """
+    GRPO相关配置，特别是奖励函数的配置
+    """
+
+    reward_funcs: list[str] = field(
+        default_factory=lambda: ["accuracy", "format"],
+        metadata={
+            "help": "List of reward functions. Possible values: 'accuracy', 'format', 'reasoning_steps', 'cosine', 'repetition_penalty'"
+        },
+    )
+    cosine_min_value_wrong: float = field(
+        default=-0.5,
+        metadata={"help": "Minimum reward for cosine scaling for wrong answers"},
+    )
+    cosine_max_value_wrong: float = field(
+        default=-0.1,
+        metadata={"help": "Maximum reward for cosine scaling for wrong answers"},
+    )
+    cosine_min_value_correct: float = field(
+        default=0.8,
+        metadata={"help": "Minimum reward for cosine scaling for correct answers"},
+    )
+    cosine_max_value_correct: float = field(
+        default=1.0,
+        metadata={"help": "Maximum reward for cosine scaling for correct answers"},
+    )
+    cosine_max_len: int = field(
+        default=1000,
+        metadata={"help": "Maximum length for cosine scaling"},
+    )
+
+    repetition_n_grams: int = field(
+        default=3,
+        metadata={"help": "Number of n-grams for repetition penalty reward"},
+    )
+    repetition_max_penalty: float = field(
+        default=-0.1,
+        metadata={
+            "help": "Maximum (negative) penalty for for repetition penalty reward"},
+    )
+
+
+# Define TrainingArguments from transformers
+training_args = TrainingArguments(
+    output_dir=OUTPUT_DIR,          # Output directory for checkpoints and logs
+    overwrite_output_dir=True,
+    num_train_epochs=1,             # Total number of training epochs
+    per_device_train_batch_size=8,  # Batch size per device during training
+    per_device_eval_batch_size=16,   # Batch size for evaluation
+    gradient_accumulation_steps=2,  # Accumulate gradients to simulate larger batch size
+    learning_rate=5e-5,            # Initial learning rate for AdamW optimizer
+    # Linear warmup over warmup_ratio fraction of training steps
+    warmup_ratio=0.1,
+    # Apply weight decay to all layers except bias and LayerNorm weights
+    weight_decay=0.01,
+    logging_steps=10,              # Log every X updates steps
+    eval_strategy="steps",    # Evaluate every `eval_steps`
+    eval_steps=50,                 # Evaluation and logging steps
+    save_strategy="steps",         # Save checkpoint every `save_steps`
+    save_steps=50,                 # Save checkpoint every X updates steps
+    # Limit the total amount of checkpoints. Deletes the older checkpoints.
+    save_total_limit=2,
+    dataloader_num_workers=2,      # Number of subprocesses to use for data loading
+    seed=42,                       # Random seed for reproducibility
+    bf16=True,                     # Use mixed precision BFP16 training
+    push_to_hub=False,             # Whether to push the final model to Hugging Face Hub
+    gradient_checkpointing=True,   # Enable gradient checkpointing
+    report_to="none",              # Reporting to no one
+)
+
+
+@dataclass
+class ModelConfig:
+    """
+    Configuration for the model.
+    """
+    model_name_or_path: str = field(
+        default=MODEL_NAME, metadata={
+            "help": "Path to pretrained model or model identifier from huggingface.co/models"}
+    )
+    model_revision: Optional[str] = field(
+        default="main", metadata={"help": "The specific model version to use (can be a branch name, tag name or commit id)."}
+    )
+    torch_dtype: Optional[str] = field(
+        default="bfloat16", metadata={"help": "Override the default `torch_dtype` and load the model under this dtype."}
+    )
+    trust_remote_code: bool = field(
+        default=True, metadata={"help": "Trust remote code when loading model and tokenizer."}
+    )
+    attn_implementation: Optional[str] = field(
+        default="flash_attention_2", metadata={"help": "Attention implementation to use. 'flash_attention_2' or None"}
+    )
+
+
+# Instantiate configuration objects
+script_args = GRPOScriptArguments()
+model_args = ModelConfig()
+
+# Utility function to get reward functions based on script arguments
+
+
+def get_reward_functions(script_args):
+    """
+    Returns a list of reward functions based on the script arguments.
+    """
+    reward_funcs_list = []
+    reward_funcs_registry = {
+        "accuracy": accuracy_reward,  # Assuming accuracy_reward is defined in previous steps
+        "format": format_reward,      # Assuming format_reward is defined in previous steps
+        # Assuming reasoning_steps_reward is defined
+        "reasoning_steps": reasoning_steps_reward,
+        "cosine": get_cosine_scaled_reward(  # Assuming get_cosine_scaled_reward is defined
+            min_value_wrong=script_args.cosine_min_value_wrong,
+            max_value_wrong=script_args.cosine_max_value_wrong,
+            min_value_correct=script_args.cosine_min_value_correct,
+            max_value_correct=script_args.cosine_max_value_correct,
+            max_len=script_args.cosine_max_len,
+        ),
+        "repetition_penalty": get_repetition_penalty_reward(  # Assuming get_repetition_penalty_reward is defined
+            ngram_size=script_args.repetition_n_grams,
+            max_penalty=script_args.repetition_max_penalty,
+        ),
+    }
+
+    for func_name in script_args.reward_funcs:
+        if func_name not in reward_funcs_registry:
+            raise ValueError(
+                f"Reward function '{func_name}' not found in registry.")
+        reward_funcs_list.append(reward_funcs_registry[func_name])
+
+    return reward_funcs_list
+
+
+logger = logging.getLogger(__name__)
+
+
+class LoggingCallback(TrainerCallback):
+    """
+    A simple callback for logging training information at specific steps.
+    """
+
+    def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        if state.global_step % args.logging_steps == 0:
+            logger.info(
+                f"Step {state.global_step}: Loss = {state.log_history[-1].get('loss', None)}, Learning Rate = {state.log_history[-1].get('learning_rate', None)}")
+
+
+def get_callbacks(training_args, model_args, script_args):
+    """
+    Returns a list of callbacks to be used during training.
+    For now, it includes only the LoggingCallback. You can extend this to add more callbacks.
+    """
+    callbacks = [LoggingCallback()]  # Instantiate our LoggingCallback
+    return callbacks
+
+
+# Get reward functions and callbacks
+reward_functions = get_reward_functions(script_args)
+callbacks = get_callbacks(training_args, model_args, script_args)
+
+# Create GRPOConfig from TrainingArguments
+grpo_config = GRPOConfig(
+    **training_args.to_dict(),  # Convert TrainingArguments to dictionary and unpack
+    **{
+        # REMOVED model_init_kwargs here
+        # We are passing the instantiated 'model' object, so GRPOTrainer doesn't need model_init_kwargs
+    }
+)
+
+grpo_trainer = GRPOTrainer(
+    model=model,                      # Our initialized Qwen model
+    reward_funcs=reward_functions,    # List of reward functions from previous step
+    # GRPOConfig (created from TrainingArguments)
+    args=grpo_config,
+    train_dataset=dataset['train'],   # Training dataset
+    eval_dataset=dataset['test'],    # Evaluation dataset
+    callbacks=callbacks              # List of callbacks
+)
+
+# Start the GRPO Training Loop
+train_result = grpo_trainer.train()
+
+# Define the path to your trained model (same as OUTPUT_DIR)
+TRAINED_MODEL_PATH = "data/Qwen-GRPO-training"
+
+# Save the tokenizer
+tokenizer.save_pretrained(TRAINED_MODEL_PATH)
+
+# Save the trained model
+grpo_trainer.save_model(TRAINED_MODEL_PATH)
+
+print(f"GRPO Trained model saved to {TRAINED_MODEL_PATH}")
+
+# Load the tokenizer - make sure to use trust_remote_code=True if needed
+tokenizer = AutoTokenizer.from_pretrained(
+    TRAINED_MODEL_PATH,
+    trust_remote_code=True, # If your model config requires it
+    padding_side="right" # Ensure consistent padding side
+)
+
+# Set pad token if it wasn't saved or loaded correctly
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+# Load the trained model itself
+trained_model = AutoModelForCausalLM.from_pretrained(
+    TRAINED_MODEL_PATH,
+    trust_remote_code=True, # If your model architecture requires it
+    torch_dtype=torch.bfloat16 # Keep the same dtype as training for consistency
+)
+
+# Move the loaded model to your device (GPU if available)
+trained_model.to(device) # 'device' is still our CUDA device from before
+
+# Testing Inference with the Trained Model
+def test_trained_model_inference(user_input: str):
+    """Test inference with the loaded trained model and tokenizer."""
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT}, # Re-use our system prompt
+        {"role": "user", "content": user_input}
+    ]
+
+    # Apply chat template using our tokenizer
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+
+    # Tokenize the input text
+    inputs = tokenizer(text, return_tensors="pt").to(device)
+
+    # Generate output using our *trained_model*
+    outputs = trained_model.generate(
+        **inputs,
+        max_new_tokens=200, # Maybe generate a bit longer now
+        do_sample=True,
+        temperature=0.7
+    )
+
+    # Decode the generated tokens back to text
+    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return response
 
