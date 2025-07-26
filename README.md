@@ -838,6 +838,111 @@ Q-Learning 方法的例子包括
 
 研究者们提出了各种基于策略梯度法的算法。本章首先介绍最简单的策略梯度法。然后，在改进这个简单的梯度法的过程中，我们推导出了被称为 “REINFORCE” 的算法。接下来，在进一步改进 “REINFORCE” 的过程中， 我们又推导出了带基线的 REINFORCE 方法和 Actor-Critic 方法。
 
+## OpenAI Gym
+
+OpenAI Gym是一个开源库，它提供了各种强化学习任务 （环境）。
+
+OpenAI Gym的许多任务的接口是通用的。因此，我们可以轻松地切换强化学习任务。另外，在强化学习相关论文中，OpenAI Gym（尤其是OpenAI Gym的Atari游戏）经常被用作基准。下面介绍OpenAI Gym的基本使用方法。
+
+### OpenAI Gym的基础知识
+
+首先安装 OpenAI Gym 的 `gym` 模块。可以通过 `pip` 进行安装，如下所示 。
+
+```sh
+$ pip install gym
+```
+
+只要在终端上运行上面这行命令，即可完成安装。接下来使用 `gym` 模块。OpenAI Gym提供了各种各样的环境 ，这里指定 `CartPole-v1` 环境。先从以下代码开始。
+
+```py
+import gym
+
+env = gym.make('CartPole-v1')
+```
+
+这样就生成了倒立摆的环境。倒立摆是下图所示的调整状态使杆子不倒的平衡游戏。
+
+![](./images/21.png)
+
+如图所示，将推车向右或向左移动，以保持杆子的平衡。倒立摆的结束条件是杆子的平衡被打破（杆子超过一定的角度），或者推车的移动位置超出了某个范围。
+
+倒立摆环境的上限为500步。如果能在500步之内保持平衡，那么游戏就结束了。
+
+下面继续执行以下代码。
+
+```py
+state, info = env.reset()
+print(state) # 初始状态
+
+action_space = env.action_space
+print(action_space)
+```
+
+输出结果
+
+```
+[-0.01054909  0.03128256 -0.01050404 -0.02760809]
+Discrete(2)
+```
+
+上面的代码通过 `state, info = env.reset()` 获得了初始状态。观察它的输出，你会发现它是拥有4个元素的数组。作为参考，下面依次列出这4个元素。
+
+- 推车的位置
+- 推车的速度
+- 杆子的角度
+- 杆子的角速度
+
+另外，我们可以通过 `env.action_space` 获得动作的维度（可采取的动作数）。它的输出是一个名为 `Discrete(2)` 的类实例。这意味着有两个候选动作。具体来说，`0` 对应的是向左移动推车的动作，`1` 对应的是向右移动推车的动作。下面实际地采取动作，向前推进一个时间步。
+
+```py
+action = 0 # 或者 1
+next_state, reward, terminated, truncated, info = env.step(action)
+print(next_state)
+```
+
+上面的代码通过 `env.step(action)` 采取动作。作为结果，我们得到了以下 5 个信息。
+
+- 下一个状态（`next_state`）
+- 奖励（`reward`）
+- 终止标志（`terminated`）：说明没有到达上限500步，倒立摆就倒了，或者被推出去了。
+- 截断标志（`truncated`）：说明到达了上限500步，成功完成，游戏停止。
+- 附加信息（`info`）
+
+`reward` 是标量值（`float`）。这次的任务在保持平衡的时候总是会得到奖励 `1` 。`info` 包含有助于调试的信息（如环境模型）。但在实现和评估强化学习的算法时，基本不会用到 `info` 。
+
+### 随机智能体
+
+上一节所介绍的内容是在使用 OpenAI Gym 时需要掌握的知识。下面把代码汇总起来运行。这里假设有一个随机智能体（随机采取行动的智能体），我们让它运行一个回合。代码如下所示。
+
+```py
+import numpy as np
+import gym
+
+env = gym.make('CartPole-v1', render_mode='human')
+state, _ = env.reset()
+done = False
+
+while not done:
+    env.render()
+    action = np.random.choice([0, 1])
+    next_state, reward, terminated, truncated, info = env.step(action)
+    done = terminated or truncated
+
+env.close()
+```
+
+上面的代码会使用 `while` 语句重复采取行动，直到回合结束。具体的行动是对 `0` 或 `1` 进行随机采样。另外，在OpenAI Gym中，可以通过 `env.render()` 进行任务的可视化。
+
+由于本次采取的是随机的行动，因此我们马上就得到了平衡崩坏的结果。下一节将使用策略梯度算法来挑战倒立摆问题。
+
+> [!NOTE]
+> 【补充】关于状态和观察
+> OpenAI Gym的文档使用术语“观察”（observation）来代替“状态”（state）。OpenAI Gym 的 API 也是以“观察”命名的（如 `env.observation_space` 等）。
+>
+> 状态和观察是不同的。状态是关于环境的“完整描述（信息）”。如果知道状态，那么马尔可夫决策过程将完全决定下一个状态和奖励的概率分布。而观察是状态的“部分描述”。想象一下从智能体那里只能看到问题（世界）的一部分的场景（扑克牌、麻将等），就容易理解观察了。
+>
+> 在有些任务中，状态和观察也可以是相同的，但是考虑到各种强化学习的任务，比起“状态”，使用“观察”这个用语更加合适 。因此，OpenAI Gym使用了“观察”这个用语。由于本教程只处理状态和观察相同的问题，因此将继续使用“状态”这个用语。
+
 ## 最简单的策略梯度法
 
 策略梯度法是使用梯度来更新策略的方法的总称。策略梯度法的算法有很多，这里推导最简单的策略梯度法。从下一节开始，我们会在这里学到的方法的基础上进行改进，同时介绍新的方法。
