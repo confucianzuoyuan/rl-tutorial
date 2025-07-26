@@ -439,6 +439,36 @@ $$
 
 其中 $\pi^*$ 为最优策略 。
 
+### 价值函数
+
+了解状态或状态-动作对的值通常很有用。我们所说的值是指从该状态或状态-动作对开始，然后一直按照特定策略行动的预期回报。几乎每种强化学习算法都会以某种方式使用价值函数 。
+
+这里有四个主要值得注意的功能。
+
+1. 同策略价值函数（On-Policy Value Function） $V^{\pi}(s)$ ，如果从状态 $s$ 开始并始终按照策略 $\pi$ 行事，它将给出预期回报：
+
+$$
+V^{\pi}(s) = \underset{\tau \sim \pi}E{R(\tau)\left| s_0 = s\right.}
+$$
+
+2. 同策略动作-价值函数（On-Policy Action-Value Function）$Q^{\pi}(s,a)$ ，如果从状态 $s$ 开始，采取任意动作 $a$ （可能不是来自策略），然后永远按照策略 $\pi$ 采取行动，它将给出预期的回报：
+
+$$
+Q^{\pi}(s,a) = \underset{\tau \sim \pi}E{R(\tau)\left| s_0 = s, a_0 = a\right.}
+$$
+
+3. 最优价值函数（Optimal Value Function） $V^*(s)$ ，如果从状态 $s$ 开始并始终按照环境中的最优策略行事，它将给出预期回报：
+
+$$
+V^*(s) = \max_{\pi} \underset{\tau \sim \pi}E{R(\tau)\left| s_0 = s\right.}
+$$
+
+4. 最优动作-价值函数（Optimal Action-Value Function） $Q^*(s,a)$ ，如果从状态 $s$ 开始，采取任意动作 $a$ ，然后永远按照环境中的最优策略采取行动，它将给出预期回报：
+
+$$
+Q^*(s,a) = \max_{\pi} \underset{\tau \sim \pi}E{R(\tau)\left| s_0 = s, a_0 = a\right.}
+$$
+
 # 第二章 策略梯度法
 
 本章我们开始学习 **基于策略的方法** 。其中通过神经网络等方法将策略模型化，并使用梯度来优化策略的方法叫作策略梯度法(policy gradient method) 。
