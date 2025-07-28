@@ -1601,7 +1601,7 @@ class Agent:
 
 运行智能代理的代码与之前相同，不再赘述。得到的结果如图9-11所示。
 
-# 第三章 PPO（近端策略优化）
+# 第四章 PPO（近端策略优化）
 
 原始策略梯度公式：
 
@@ -2507,9 +2507,9 @@ $ python main.py --mode test --actor_model ppo_actor.pth
 $ python main.py --actor_model ppo_actor.pth --critic_model ppo_critic.pth
 ```
 
-# 第四章 DPO（直接策略优化）
+# 第五章 DPO（直接策略优化）
 
-本章讲解了论文“直接偏好优化：你的语言模型实际上是一个奖励模型”（‘Direct Preference Optimization: Your Language Model is Secretly a Reward Model’），并通过在 PyTorch 和 HuggingFace DPOTrainer 中从头编写 DPO 给出了实际的代码示例。
+本章讲解了论文“直接偏好优化：你的语言模型实际上是一个奖励模型”（《Direct Preference Optimization: Your Language Model is Secretly a Reward Model》），并通过在 PyTorch 和 HuggingFace DPOTrainer 中从头编写 DPO 给出了实际的代码示例。
 
 ## 1. 介绍
 
@@ -2524,10 +2524,10 @@ RLHF 是一种用于微调 LLM 的技术，它通过最大化一个奖励函数�
 基于预先训练的 LLM，强化学习从人类反馈 (RLHF) 主要分为三个步骤：
 
 1. 使用 LLM 从提示数据集生成一组样本。
-2. 人工评估员对样本进行评级，并根据样本及其评级训练单独的奖励模型。
+2. 人工评估员对样本进行评分，并根据样本及其评分训练单独的奖励模型。
 3. 使用奖励模型作为奖励信号对 LLM 进行微调。
 
-![](./images/RLHF.png)
+![](./images/RLHF.svg)
 
 在 RLHF 中，人类评估员对语言模型的响应进行评分，然后基于这些评分训练一个奖励模型来量化响应质量。奖励模型为每个响应分配一个分数，捕捉人类的评估模式。为了优化语言模型，通常使用近端策略优化 (PPO)。PPO 通过尝试最大化奖励模型的预期奖励来调整语言模型，同时保持受控的更新，使其不会与原始模型的行为偏差过大。它通过应用 KL 散度来实现这一点，即将更新策略的概率分布与原始预训练模型的冻结版本进行比较作为参考。这种比较确保策略更新不会与原始模型的行为偏差过大，从而实现稳定的微调过程。在 RLHF 过程结束时，语言模型经过微调，生成更有可能获得人类评估员高度评价的响应，从而改进模型的行为。
 
@@ -2597,10 +2597,6 @@ $$
 现在我们已经很好地理解了 DPO 背后的数学原理，让我们看看如何在实践中实现它！
 
 ## 5. 在 PyTorch 中从头开始编写 DPO
-
-
-
-# 第五章 KTO
 
 # 第六章 GRPO
 
@@ -4183,4 +4179,6 @@ def test_trained_model_inference(user_input: str):
     response = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return response
 ```
+
+# 第七章 KTO
 
