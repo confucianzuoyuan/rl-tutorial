@@ -3051,7 +3051,584 @@ def kl_sft(model_chosen_logp, reference_chosen_logp, lambd):
 > 多种损失函数
 > 我们其实不一定要局限于 DPO 论文中给的损失函数，还可以使用其它损失函数，训练效果都不错。
 
+下面编写一些帮助函数：
 
+首先是 `encoder.py` ，这里主要实现了 `bpe` 算法。
+
+```py
+"""Byte pair encoding utilities"""
+
+import json
+import regex as re
+from functools import lru_cache
+import os
+
+@lru_cache()
+def bytes_to_unicode():
+    """
+    Returns list of utf-8 byte and a corresponding list of unicode strings.
+    The reversible bpe codes work on unicode strings.
+    This means you need a large # of unicode characters in your vocab if you want to avoid UNKs.
+    When you're at something like a 10B token dataset you end up needing around 5K for decent coverage.
+    This is a signficant percentage of your normal, say, 32K bpe vocab.
+    To avoid that, we want lookup tables between utf-8 bytes and unicode strings.
+    And avoids mapping to whitespace/control characters the bpe code barfs on.
+    """
+    bs = list(range(ord("!"), ord("~")+1))+list(range(ord("¡"), ord("¬")+1))+list(range(ord("®"), ord("ÿ")+1))
+    cs = bs[:]
+    n = 0
+    for b in range(2**8):
+        if b not in bs:
+            bs.append(b)
+            cs.append(2**8+n)
+            n += 1
+    cs = [chr(n) for n in cs]
+    return dict(zip(bs, cs))
+
+def get_pairs(word):
+    """Return set of symbol pairs in a word.
+    Word is represented as tuple of symbols (symbols being variable-length strings).
+    """
+    pairs = set()
+    prev_char = word[0]
+    for char in word[1:]:
+        pairs.add((prev_char, char))
+        prev_char = char
+    return pairs
+
+class Encoder:
+    def __init__(self, encoder, bpe_merges, errors='replace'):
+        self.encoder = encoder
+        self.decoder = {v:k for k,v in self.encoder.items()}
+        self.errors = errors # how to handle errors in decoding
+        self.byte_encoder = bytes_to_unicode()
+        self.byte_decoder = {v:k for k, v in self.byte_encoder.items()}
+        self.bpe_ranks = dict(zip(bpe_merges, range(len(bpe_merges))))
+        self.cache = {}
+
+        # Should haved added re.IGNORECASE so BPE merges can happen for capitalized versions of contractions
+        self.pat = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
+
+    def bpe(self, token):
+        if token in self.cache:
+            return self.cache[token]
+        word = tuple(token)
+        pairs = get_pairs(word)
+
+        if not pairs:
+            return token
+
+        while True:
+            bigram = min(pairs, key = lambda pair: self.bpe_ranks.get(pair, float('inf')))
+            if bigram not in self.bpe_ranks:
+                break
+            first, second = bigram
+            new_word = []
+            i = 0
+            while i < len(word):
+                try:
+                    j = word.index(first, i)
+                    new_word.extend(word[i:j])
+                    i = j
+                except:
+                    new_word.extend(word[i:])
+                    break
+
+                if word[i] == first and i < len(word)-1 and word[i+1] == second:
+                    new_word.append(first+second)
+                    i += 2
+                else:
+                    new_word.append(word[i])
+                    i += 1
+            new_word = tuple(new_word)
+            word = new_word
+            if len(word) == 1:
+                break
+            else:
+                pairs = get_pairs(word)
+        word = ' '.join(word)
+        self.cache[token] = word
+        return word
+
+    def encode(self, text):
+        bpe_tokens = []
+        for token in re.findall(self.pat, text):
+            token = ''.join(self.byte_encoder[b] for b in token.encode('utf-8'))
+            bpe_tokens.extend(self.encoder[bpe_token] for bpe_token in self.bpe(token).split(' '))
+        return bpe_tokens
+
+    def decode(self, tokens):
+        text = ''.join([self.decoder[token] for token in tokens])
+        text = bytearray([self.byte_decoder[c] for c in text]).decode('utf-8', errors=self.errors)
+        return text
+
+def get_encoder():
+    dir = os.path.dirname(os.path.abspath(__file__))
+    encoder_path = os.path.join(dir, "encoder.json")
+    bpe_path = os.path.join(dir, "vocab.bpe")
+    with open(encoder_path, 'r') as f:
+        encoder = json.load(f)
+    with open(bpe_path, 'r', encoding="utf-8") as f:
+        bpe_data = f.read()
+    bpe_merges = [tuple(merge_str.split()) for merge_str in bpe_data.split('\n')[1:-1]]
+    return Encoder(
+        encoder=encoder,
+        bpe_merges=bpe_merges,
+    )
+```
+
+还有处理数据的代码
+
+```py
+from torch.utils.data import Dataset, DataLoader, random_split
+import torch
+import json
+from .encoder import Encoder
+
+class DPODataset(Dataset):
+    def __init__(self, json_file: str, enc: Encoder):
+        self.pairs_list = json.loads(open(json_file).read())
+        self.enc = enc
+    
+    def __len__(self):
+        return len(self.pairs_list)
+
+    def __getitem__(self, idx):
+        pair = self.pairs_list[idx]
+        prompt = self.enc.encode(pair["prompt"])
+        chosen = self.enc.encode(pair["chosen"])
+        rejected = self.enc.encode(pair["rejected"])
+        
+        joined_chosen = prompt + self.enc.encode(" ") + chosen
+        joined_rejected = prompt + self.enc.encode(" ") + rejected
+        
+        data = {
+            "chosen": joined_chosen,
+            "rejected": joined_rejected
+        }
+        
+        return data
+
+def custom_collate_fn(batch, pad_token_id=50256, allowed_max_length=None):
+    # Initialize lists to hold batch data
+    batch_data = {
+        "chosen": [],
+        "rejected": [],
+        "rejected_mask": [],
+        "chosen_mask": []
+    }
+
+    # Determine the longest sequence to set a common padding length
+    max_length_common = 0
+    if batch:
+        for key in ["chosen", "rejected"]:
+            current_max = max(len(item[key])+1 for item in batch)
+            max_length_common = max(max_length_common, current_max)
+
+    # Process each item in the batch
+    for item in batch:
+        for key in ["chosen", "rejected"]:
+            # Adjust padding according to the common maximum length
+            sequence = item[key]
+            padded = sequence + [pad_token_id] * (max_length_common - len(sequence))
+            mask = torch.ones(len(padded))
+
+            # Set mask for all padding tokens to 0
+            mask[len(sequence):] = 0
+
+            batch_data[key].append(torch.tensor(padded))
+            batch_data[f"{key}_mask"].append(mask)
+
+    # Final processing
+    for key in ["chosen", "rejected", "chosen_mask", "rejected_mask"]:
+        # Stack all sequences into a tensor for the given key
+        tensor_stack = torch.stack(batch_data[key])
+        # Optionally truncate to maximum sequence length
+        if allowed_max_length is not None:
+            tensor_stack = tensor_stack[:, :allowed_max_length]
+
+        batch_data[key] = tensor_stack
+
+    return batch_data
+
+def get_dataset(json_file: str, enc: Encoder):
+    dataset = DPODataset(json_file, enc)
+    return dataset
+
+def get_val_split(dataset: DPODataset, val_size: float):
+    train_set, val_set = random_split(dataset, [1-val_size, val_size])
+    return train_set, val_set
+
+def get_dataloaders(dataset: DPODataset, batch_size: int, shuffle: bool = True):
+    loader = DataLoader(dataset, batch_size=batch_size, collate_fn=custom_collate_fn, shuffle=True)
+    return loader
+```
+
+以及保存训练数据的可视化图像的代码
+
+```py
+from matplotlib import pyplot as plt
+import torch
+
+def test_samples(prompts, model, enc, device):
+    """
+    Test a model on a list of prompts by generating completions.
+    
+    Parameters
+    ----------
+    prompts : list of str
+        The list of prompts to test on.
+    model : torch.nn.Module
+        The model to test.
+    enc : dpo.Encoder
+        The encoder to use.
+    device : torch.device
+        The device to use.
+    
+    Returns
+    -------
+    out_completions : list of str
+        The generated completions.
+    """
+    out_completions = []
+    for text in prompts:
+        encoded = enc.encode(text)
+        context = torch.tensor(encoded, device=device, dtype=torch.long).unsqueeze(0)
+        context = context.to(device)
+        completion = model.generate(context)
+        out = completion[0, :].tolist()
+        out = enc.decode(out)
+        out_completions.append(out)
+        
+    return out_completions
+
+def save_plots(train_steps, train_losses, val_steps, val_losses, val_chosen_rewards, val_rejected_rewards, val_margins, path):
+    """
+    Saves plots of the loss and rewards of a DPO training run.
+    """
+    plt.figure(figsize=(9, 6))
+    
+    plt.plot(train_steps, train_losses, label="Train Loss", color="blue")
+    plt.plot(val_steps, val_losses, label="Validation Loss", color="orange")
+    plt.legend()
+    plt.xlabel("Training steps")
+    plt.ylabel("DPO Loss")
+    plt.title("Loss during Training")
+    
+    plt.savefig(path + "loss_plot.png", dpi=300)
+    
+    plt.figure(figsize=(9, 6))
+    plt.plot(val_steps, val_margins, label="Validation Margin", color="orange")
+    plt.xlabel("Training steps")
+    plt.ylabel("Reward Margin")
+    plt.title("Reward Margin during Training")
+    
+    plt.savefig(path + "margin_plot.png", dpi=300)
+    
+    plt.figure(figsize=(9, 6))
+    plt.plot(val_steps, val_chosen_rewards, label="Chosen Response Reward", color="green")
+    plt.plot(val_steps, val_rejected_rewards, label="Rejected Response Reward", color="red")
+    plt.legend()
+    plt.xlabel("Training steps")
+    plt.ylabel("Rewards (logratios between actor and reference)")
+    plt.title("Rewards during Training")
+    
+    plt.savefig(path + "rewards_plot.png", dpi=300)
+```
+
+最后是训练脚本
+
+```py
+"""
+Trains a GPT-2 model using DPO on a provided dataset.
+"""
+
+from dpo.encoder import get_encoder
+from dpo.torch_dataset import get_dataset, get_val_split, get_dataloaders
+from dpo.loss import logprobs, dpo_loss, dpop_loss, sft, kl_sft
+from dpo.model import GPT, GPTConfig
+from dpo.utils import save_plots, test_samples
+
+import torch
+from torch.optim import Adam
+from torch.optim.lr_scheduler import CosineAnnealingLR
+import random
+import argparse
+import os
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--batch_size", type=int, default=4)
+parser.add_argument("--epochs", type=int, default=2)
+parser.add_argument("--lr", type=float, default=1e-4)
+parser.add_argument("--beta", type=float, default=0.5)
+parser.add_argument("--dataset", type=str, default="dataset/upenn_dataset.json")
+parser.add_argument("--results_dir", type=str, default="results")
+parser.add_argument("--loss", type=str, default="dpop")
+
+def forward_pass_batch(batch, model, reference, device, beta, loss_fn):
+    chosen = batch["chosen"]
+    rejected = batch["rejected"]
+    chosen_mask = batch["chosen_mask"]
+    rejected_mask = batch["rejected_mask"]
+    
+    chosen = chosen.to(device)
+    rejected = rejected.to(device)
+    chosen_mask = chosen_mask.to(device)
+    rejected_mask = rejected_mask.to(device)
+    
+    # Forward pass
+    chosen_policy_logits = model(chosen)[0]
+    rejected_policy_logits = model(rejected)[0]
+    
+    chosen_reference_logits = reference(chosen)[0]
+    rejected_reference_logits = reference(rejected)[0]
+    
+    chosen_policy_logprobs = logprobs(chosen_policy_logits, chosen, chosen_mask)
+    rejected_policy_logprobs = logprobs(rejected_policy_logits, rejected, rejected_mask)
+    
+    chosen_reference_logprobs = logprobs(chosen_reference_logits, chosen, chosen_mask)
+    rejected_reference_logprobs = logprobs(rejected_reference_logits, rejected, rejected_mask)
+    
+    if loss_fn == "dpop":
+        loss, chosen_rewards, rejected_rewards = dpop_loss(
+            chosen_policy_logprobs, rejected_policy_logprobs,
+            chosen_reference_logprobs, rejected_reference_logprobs, beta
+        )
+        return loss, chosen_rewards, rejected_rewards
+    
+    elif loss_fn == "dpo":
+        loss, chosen_rewards, rejected_rewards = dpo_loss(
+            chosen_policy_logprobs, rejected_policy_logprobs,
+            chosen_reference_logprobs, rejected_reference_logprobs, beta
+        )
+        return loss, chosen_rewards, rejected_rewards
+    
+    elif loss_fn == "sft":
+        loss = sft(
+            chosen_policy_logits, chosen, chosen_mask
+        )
+        
+        return loss, None, None
+
+    elif loss_fn == "kl_sft":
+        loss = kl_sft(
+            chosen_policy_logprobs, rejected_policy_logprobs, 0.1
+        )
+        
+        return loss, None, None
+
+def eval_loss(val_loader, model, reference, device, beta, loss_fn):
+    model.eval()
+    
+    losses = []
+    chosen = []
+    rejected = []
+    margins = []
+    
+    with torch.no_grad():
+        for batch in val_loader:
+            loss, chosen_reward, rejected_reward = forward_pass_batch(batch, model, reference, device, beta, loss_fn)
+            losses.append(loss.item())
+            
+            if loss_fn == "dpo" or loss_fn == "dpop":
+                chosen.append(chosen_reward)
+                rejected.append(rejected_reward)
+                margins.append(chosen_reward - rejected_reward)
+            
+            else:
+                chosen.append(0)
+                rejected.append(0)
+                margins.append(0)
+    
+    return sum(losses) / len(losses), sum(chosen) / len(chosen), sum(rejected) / len(rejected), sum(margins) / len(margins)
+
+def train(train_loader, val_loader, model, reference, optimizer, enc, device, epochs, beta, loss_fn):
+    
+    train_losses = []
+    train_steps = []
+    
+    val_steps = []
+    val_losses = []
+    val_chosen_rewards = []
+    val_rejected_rewards = []
+    val_margins = []
+    
+    num_batches = len(train_loader)
+    
+    scheduler = CosineAnnealingLR(optimizer, T_max = num_batches * epochs, eta_min=1e-7)
+    
+    for epoch in range(1, epochs + 1):
+        print (f"---------------- EPOCH {epoch} / {epochs} ----------------")
+
+        # Sample some completions from the model to check progress
+        model.eval()
+        prompts = ["The morning started with a surprise as", "The calm before the storm"]
+        completions = test_samples(prompts, model, enc, device)
+        for completion in completions:
+            print (f"Sample generation: {completion}")
+        
+        model.train()
+        for i, batch in enumerate(train_loader):
+            optimizer.zero_grad()
+
+            loss, chosen_reward, rejected_reward = forward_pass_batch(batch, model, reference, device, beta, loss_fn)
+            
+            if chosen_reward is None:
+                chosen_reward = torch.Tensor([0])
+                rejected_reward = torch.Tensor([0])
+            
+            print (f"Step {i+1}/{num_batches} | Loss: {round(loss.item(), 5)} | Chosen r: {round(chosen_reward.item(), 4)} | Rejected r: {round(rejected_reward.item(), 4)}")
+            
+            train_steps.append(i + (epoch - 1) * num_batches)
+            train_losses.append(loss.item())
+            
+            # Backward pass
+            loss.backward()
+            
+            optimizer.step()
+            
+            scheduler.step()
+            
+            if i % (num_batches // 8) == 0:
+                val_loss, r_chosen, r_rejected, val_margin = eval_loss(val_loader, model, reference, device, beta, loss_fn)
+                val_losses.append(val_loss)
+                val_chosen_rewards.append(r_chosen)
+                val_rejected_rewards.append(r_rejected)
+                val_margins.append(val_margin)
+                val_steps.append(i + (epoch - 1) * num_batches)
+                print (f"Val loss: {val_loss}")
+                
+    return train_steps, train_losses, val_steps, val_losses, val_chosen_rewards, val_rejected_rewards, val_margins
+
+def main():
+    args = parser.parse_args()
+    bs = args.batch_size
+    epochs = args.epochs
+    lr = args.lr
+    beta = args.beta
+    dataset = args.dataset
+    results_dir = args.results_dir
+    loss_fn = args.loss
+    
+    WEIGHTS_FILE = f"{results_dir}/gpt2-{loss_fn}.pt"
+    
+    seed = random.randint(0, 100000)
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Define target and reference model
+    config = GPTConfig()
+    model = GPT(config).from_pretrained("gpt2")
+    reference = GPT(config).from_pretrained("gpt2")
+    reference.eval()
+    
+    # Load weights into both target and reference model    
+    model.to(device)
+    reference.to(device)
+
+    # Load Model
+    enc = get_encoder()
+    
+    # Define optimizer
+    optimizer = Adam(model.parameters(), lr=lr)
+    
+    # Get train/val dataloaders
+    upenn_dataset = get_dataset(dataset, enc)
+    train_set, val_set = get_val_split(upenn_dataset, 0.1)
+    train_loader = get_dataloaders(train_set, bs)
+    val_loader = get_dataloaders(val_set, bs, shuffle=False)
+    
+    print (f"Starting training with {len(train_set)} training samples and {args.loss} loss.")
+    
+    train_steps, train_losses, val_steps, val_losses, val_chosen_rewards, val_rejected_rewards, val_margins = train(
+        train_loader, val_loader, model, reference, optimizer, enc, device, epochs, beta, loss_fn
+    )
+    
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir)
+    
+    # Save the trained model
+    torch.save(model.state_dict(), WEIGHTS_FILE)
+    
+    save_plots(train_steps, train_losses, val_steps, val_losses, val_chosen_rewards, val_rejected_rewards, val_margins, results_dir + "/" + loss_fn)    
+    
+if __name__ == '__main__':
+    main()
+```
+
+训练命令
+
+```sh
+$ python train.py --loss dpop --epochs 2 --beta 0.5
+```
+
+训练好之后，可以进行测试。
+
+```sh
+$ python generate_completions.py --dataset dataset/upenn_test.json --model dpop
+```
+
+生成测试回应的代码 `generate_completions.py` 如下：
+
+```py
+"""
+Loads a model that was DPO trained and generates completions given a held-out set of prompts.
+"""
+
+from dpo.model import GPT, GPTConfig
+from dpo.utils import test_samples
+from dpo.encoder import get_encoder
+import torch
+import json
+import csv
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--model", type=str, required=True, default="dpop")
+parser.add_argument("--results_dir", type=str, default="results")
+parser.add_argument("--dataset", type=str, default="dataset/upenn_test.json")
+
+def main():
+    args = parser.parse_args()
+    results_dir = args.results_dir
+    model = args.model
+    dataset = args.dataset
+    
+    PATH = f"{results_dir}/gpt2-{model}.pt"
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Define the model architecture
+    config = GPTConfig()
+    model = GPT(config)
+    
+    # Load the weights from a previous training run
+    model.load_state_dict(torch.load(PATH, weights_only=False, map_location=device))
+    model = model.to(device)
+    model.eval()
+    
+    enc = get_encoder()
+    
+    # Read and parse the test prompts
+    test_set = json.loads(open(dataset).read())
+    prompts = [pair["prompt"] for pair in test_set]
+    
+    # Generate completiosn for each prompt
+    completions = test_samples(prompts, model, enc, device)
+    
+    print (f"Completions done: writing to CSV.")
+    
+    # Write completions to a CSV
+    with open('results.csv', 'w') as f:
+        writer = csv.writer(f)
+        writer.writerow(["prompt", "completion"])
+        for i in range(len(prompts)):
+            writer.writerow([prompts[i], completions[i]])
+    
+if __name__ == "__main__":
+    main()
+```
 
 # 第六章 GRPO
 
