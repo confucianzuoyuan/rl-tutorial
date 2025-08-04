@@ -26,7 +26,7 @@ $$
 马尔可夫过程是一组具有马尔可夫性质的随机变量序列 $s_1,\cdots,s_t$，其中下一个时刻的状态 $s_{t+1}$ 只取决于当前状态 $s_t$ 。我们设状态的历史为 $h_{t}=\left\lbrace s_{1}, s_{2}, s_{3}, \ldots, s_{t}\right\rbrace$（ $h_t$ 包含了之前的所有状态），则马尔可夫过程满足条件：
 
 ```math
-p\left(s_{t+1} \mid s_{t}\right) =p\left(s_{t+1} \mid h_{t}\right) \tag{2.1}
+p\left(s_{t+1} \mid s_{t}\right) =p\left(s_{t+1} \mid h_{t}\right)
 ```
 
 从当前 $s_t$ 转移到 $s_{t+1}$ ，它是直接就等于它之前所有的状态转移到 $s_{t+1}$ 。
